@@ -178,6 +178,33 @@ export function useRoadmap() {
     return prune(sorted)
   })
 
+  function directionCompetencyTree(directionId: string): CompetencyNode[] {
+    const assignedIds = new Set(
+      activeRelations.value
+        .filter((relation) => relation.directionId === directionId)
+        .map((relation) => relation.competencyId),
+    )
+    const nodes = new Map<string, CompetencyNode>()
+    for (const competency of visibleCompetencies.value) {
+      if (assignedIds.has(competency.id)) {
+        nodes.set(competency.id, { competency, children: [] })
+      }
+    }
+
+    const roots: CompetencyNode[] = []
+    for (const node of nodes.values()) {
+      const parentId = node.competency.parentId
+      const parent = parentId ? nodes.get(parentId) : undefined
+      if (parent) {
+        parent.children.push(node)
+      } else {
+        roots.push(node)
+      }
+    }
+
+    return sortNodes(roots)
+  }
+
   const inProgressMilestones = computed(
     () =>
       visibleMilestones.value.filter(
@@ -202,18 +229,33 @@ export function useRoadmap() {
     return ids
   }
 
+  function sortMilestones(rows: Milestone[]): Milestone[] {
+    return rows.slice().sort((left, right) => {
+      const leftDate = left.dueDate ?? left.startDate ?? '9999-12-31'
+      const rightDate = right.dueDate ?? right.startDate ?? '9999-12-31'
+      return leftDate.localeCompare(rightDate) || left.name.localeCompare(right.name, 'zh-CN')
+    })
+  }
+
   function milestonesOfDirection(directionId: string): Milestone[] {
-    return visibleMilestones.value
-      .filter((milestone) => milestone.directionId === directionId)
-      .sort((left, right) => {
-        const leftDate = left.dueDate ?? left.startDate ?? ''
-        const rightDate = right.dueDate ?? right.startDate ?? ''
-        return leftDate.localeCompare(rightDate)
-      })
+    return sortMilestones(
+      visibleMilestones.value.filter((milestone) => milestone.directionId === directionId),
+    )
+  }
+
+  function milestonesOfCompetency(competencyId: string, directionId?: string): Milestone[] {
+    return sortMilestones(
+      visibleMilestones.value.filter(
+        (milestone) =>
+          milestone.competencyId === competencyId &&
+          (!directionId || milestone.directionId === directionId),
+      ),
+    )
   }
 
   async function refresh(): Promise<void> {
-    loading.value = true
+    const isInitialLoad = competencies.value.length === 0 && directions.value.length === 0
+    if (isInitialLoad) loading.value = true
     error.value = null
     try {
       const [
@@ -298,6 +340,16 @@ export function useRoadmap() {
   }
 
   async function saveMilestone(input: MilestoneInput, id?: string): Promise<Milestone> {
+    if (input.competencyId) {
+      const linked = activeRelations.value.some(
+        (relation) =>
+          relation.directionId === input.directionId &&
+          relation.competencyId === input.competencyId,
+      )
+      if (!linked) {
+        throw new Error('关联能力不属于当前发展方向，请重新选择')
+      }
+    }
     const entity = id
       ? await repos.milestones.update(id, input)
       : await repos.milestones.create(input)
@@ -354,11 +406,13 @@ export function useRoadmap() {
     linkedGoalsForMilestone,
     growthHistoryFor,
     competencyTree,
+    directionCompetencyTree,
     selectedDirectionId,
     includeArchived,
     inProgressMilestones,
     coveredDirectionCount,
     milestonesOfDirection,
+    milestonesOfCompetency,
     descendantsOf,
     refresh,
     saveCompetency,

@@ -61,20 +61,71 @@ async function waitModalClosed(page, timeout = 8000) {
   await page.waitForFunction(() => !document.querySelector('.modal-backdrop'), { timeout })
 }
 
-async function clickNodeAction(page, name, label) {
-  const nodes = await page.$$('.tree-node')
-  for (const node of nodes) {
-    const nodeName = await node
-      .$eval('.node-name', (element) => (element.textContent ?? '').trim())
-      .catch(() => '')
-    if (nodeName !== name) continue
-    await node.evaluate((element) => element.scrollIntoView({ block: 'center' }))
-    const button = await node.$(`button[aria-label="${label}"]`)
-    if (!button) throw new Error(`节点中未找到操作：${label}`)
-    await button.click()
-    return
-  }
-  throw new Error(`未找到能力节点：${name}`)
+async function findAbilityNode(page, name) {
+  const found = await page.evaluate((abilityName) => {
+    return Array.from(document.querySelectorAll('.ability-node')).some(
+      (element) => element.dataset.abilityName === abilityName,
+    )
+  }, name)
+  if (!found) throw new Error(`未找到能力节点：${name}`)
+}
+
+async function clickAbilityAction(page, name, label) {
+  const result = await page.evaluate(
+    ({ abilityName, actionLabel }) => {
+      const node = Array.from(document.querySelectorAll('.ability-node')).find(
+        (element) => element.dataset.abilityName === abilityName,
+      )
+      if (!node) return { error: `未找到能力节点：${abilityName}` }
+      node.scrollIntoView({ block: 'center' })
+      const button = Array.from(
+        node.querySelectorAll(':scope > .ability-row .ability-actions button'),
+      ).find((element) => element.getAttribute('aria-label') === actionLabel)
+      if (!button) return { error: `节点中未找到操作：${actionLabel}` }
+      button.click()
+      return {}
+    },
+    { abilityName: name, actionLabel: label },
+  )
+  if (result.error) throw new Error(result.error)
+}
+
+async function clickAbilityControl(page, name, selector) {
+  const result = await page.evaluate(
+    ({ abilityName, targetSelector }) => {
+      const node = Array.from(document.querySelectorAll('.ability-node')).find(
+        (element) => element.dataset.abilityName === abilityName,
+      )
+      if (!node) return { error: `未找到能力节点：${abilityName}` }
+      node.scrollIntoView({ block: 'center' })
+      const ownedSelector =
+        targetSelector === '.ability-expand' || targetSelector === '.ability-main'
+          ? `:scope > .ability-row ${targetSelector}`
+          : targetSelector === '.ability-add-milestone'
+            ? ':scope > .ability-detail > .ability-milestones .ability-add-milestone'
+            : targetSelector
+      const target = node.querySelector(ownedSelector)
+      if (!target) return { error: `节点中未找到控件：${targetSelector}` }
+      target.click()
+      return {}
+    },
+    { abilityName: name, targetSelector: selector },
+  )
+  if (result.error) throw new Error(result.error)
+}
+
+async function ensureAbilityExpanded(page, name) {
+  const expanded = await page.evaluate((abilityName) => {
+    const node = Array.from(document.querySelectorAll('.ability-node')).find(
+      (element) => element.dataset.abilityName === abilityName,
+    )
+    if (!node) return null
+    const button = node.querySelector(':scope > .ability-row .ability-expand')
+    if (!button) return null
+    if (button.getAttribute('aria-expanded') !== 'true') button.click()
+    return true
+  }, name)
+  if (!expanded) throw new Error(`节点中未找到展开控件：${name}`)
 }
 
 async function clickCardAction(page, selector, name, label) {
@@ -134,7 +185,7 @@ try {
   await page.waitForSelector('.dashboard-grid', { timeout: 15000 })
 
   await clickText(page, 'a.nav-item', '发展路线')
-  await page.waitForSelector('.map-card', { timeout: 15000 })
+  await page.waitForSelector('.direction-card', { timeout: 15000 })
   pass('进入发展路线')
 
   const stats = await page.$$eval('.roadmap-stat .stat-number', (nodes) =>
@@ -144,9 +195,20 @@ try {
   assert(stats[1] === '2', `里程碑应为 2，实际 ${stats[1]}`)
   assert(stats[2] === '1', `进行中里程碑应为 1，实际 ${stats[2]}`)
   assert(stats[3] === '2', `覆盖方向应为 2，实际 ${stats[3]}`)
-  const nodeCount = await page.$$eval('.tree-node', (nodes) => nodes.length)
-  assert(nodeCount === 5, `能力树节点应为 5，实际 ${nodeCount}`)
-  pass('能力地图聚合', `${stats.join(' / ')}，${nodeCount} 个树节点`)
+  const initialCollapsed = await page.evaluate(() => ({
+    cards: document.querySelectorAll('.direction-card').length,
+    trees: document.querySelectorAll('.direction-body').length,
+    nodes: document.querySelectorAll('.ability-node').length,
+  }))
+  assert(initialCollapsed.cards === 2, `方向卡片应为 2，实际 ${initialCollapsed.cards}`)
+  assert(initialCollapsed.trees === 0 && initialCollapsed.nodes === 0, '路线图默认应只显示方向摘要')
+  pass('路线图摘要与统计', `${stats.join(' / ')}，默认折叠能力树`)
+
+  await clickText(page, '.direction-summary', '软硬件全栈工程')
+  await page.waitForSelector('.direction-card .ability-node', { timeout: 8000 })
+  const seedTreeNodes = await page.$$eval('.ability-node', (nodes) => nodes.length)
+  assert(seedTreeNodes >= 2, `展开后能力节点不足：${seedTreeNodes}`)
+  pass('展开方向能力树', `${seedTreeNodes} 个能力节点`)
 
   await clickText(page, '.header-actions button', '新建能力')
   await page.waitForSelector('#competency-name', { timeout: 8000 })
@@ -170,7 +232,7 @@ try {
   await waitText(page, '产品设计')
   pass('创建能力', '关联到软硬件全栈工程，要求 L3')
 
-  await clickNodeAction(page, '产品设计', '编辑能力')
+  await clickAbilityAction(page, '产品设计', '编辑能力')
   await page.waitForSelector('#competency-name', { timeout: 8000 })
   await setInput(page, '#competency-name', '产品设计与需求分析')
   await toggleRelation(page, '研究生学业与科研', true)
@@ -179,18 +241,17 @@ try {
   await waitText(page, '能力节点已更新', 15000)
   await waitModalClosed(page)
   await waitText(page, '产品设计与需求分析')
-  const tagCount = await page.$$eval('.tree-node', (nodes) => {
-    const node = nodes.find(
-      (element) =>
-        (element.querySelector('.node-name')?.textContent ?? '').trim() ===
-        '产品设计与需求分析',
-    )
-    return node ? node.querySelectorAll('.direction-tag').length : 0
-  })
-  assert(tagCount === 2, `编辑后应有 2 个方向关联，实际 ${tagCount}`)
+  await clickAbilityControl(page, '产品设计与需求分析', '.ability-main')
+  await page.waitForSelector('.drawer-panel', { timeout: 8000 })
+  const directionTags = await page.$$eval('.detail-tag', (nodes) =>
+    nodes.map((node) => (node.textContent ?? '').trim()),
+  )
+  assert(directionTags.length === 2, `编辑后应有 2 个方向关联，实际 ${directionTags.length}`)
   pass('编辑能力与多方向关联', '同一能力被 2 个方向共享')
+  await page.click('.drawer-head button')
+  await page.waitForFunction(() => !document.querySelector('.drawer-panel'), { timeout: 8000 })
 
-  await clickNodeAction(page, '产品设计与需求分析', '添加子能力')
+  await clickAbilityAction(page, '产品设计与需求分析', '添加子能力')
   await page.waitForSelector('#competency-name', { timeout: 8000 })
   await setInput(page, '#competency-name', '用户访谈')
   await setInput(page, '#competency-desc', '能够设计并执行一轮用户访谈。')
@@ -199,53 +260,57 @@ try {
   await clickText(page, '.modal-actions button', '添加能力')
   await waitText(page, '能力节点已添加', 15000)
   await waitModalClosed(page)
-  await waitText(page, '用户访谈')
-  const afterChild = await page.$$eval('.tree-node', (nodes) => nodes.length)
-  assert(afterChild === 7, `添加子能力后应有 7 个节点，实际 ${afterChild}`)
-  pass('WBS 式能力树', '新增子能力节点')
+  await ensureAbilityExpanded(page, '产品设计与需求分析')
+  await page.waitForFunction(
+    () =>
+      Array.from(document.querySelectorAll('.ability-node')).some(
+        (node) => node.dataset.abilityName === '用户访谈',
+      ),
+    { timeout: 8000 },
+  )
+  pass('WBS 式能力树', '新增子能力并展开父节点')
 
-  await clickNodeAction(page, '用户访谈', '归档能力')
+  await clickAbilityAction(page, '用户访谈', '归档能力')
   await waitText(page, '归档内容')
   await clickText(page, '.modal-actions button', '确认归档')
   await waitText(page, '已归档，可随时恢复', 15000)
   await waitModalClosed(page)
   await delay(300)
-  const visibleChild = await page.$$eval('.tree-node', (nodes) =>
-    nodes.some(
-      (node) =>
-        (node.querySelector('.node-name')?.textContent ?? '').trim() === '用户访谈',
-    ),
+  const visibleChild = await page.$$eval('.ability-name-line strong', (nodes) =>
+    nodes.some((node) => (node.textContent ?? '').trim() === '用户访谈'),
   )
   assert(!visibleChild, '归档能力仍显示在默认树中')
-  await clickText(page, '.toolbar-actions button', '显示已归档')
+  await clickText(page, '.toolbar-actions button', '显示归档')
   await delay(300)
-  await clickNodeAction(page, '用户访谈', '恢复能力')
+  await ensureAbilityExpanded(page, '产品设计与需求分析')
+  await page.waitForFunction(
+    () =>
+      Array.from(document.querySelectorAll('.ability-node')).some(
+        (node) => node.dataset.abilityName === '用户访谈',
+      ),
+    { timeout: 8000 },
+  )
+  await clickAbilityAction(page, '用户访谈', '恢复能力')
   await waitText(page, '恢复内容')
   await clickText(page, '.modal-actions button', '确认恢复')
   await waitText(page, '已恢复', 15000)
   await waitModalClosed(page)
-  await clickText(page, '.toolbar-actions button', '隐藏已归档')
+  await clickText(page, '.toolbar-actions button', '隐藏归档')
+  await ensureAbilityExpanded(page, '产品设计与需求分析')
   pass('归档与恢复能力')
 
-  await clickText(page, '.view-tab', '里程碑')
-  await page.waitForSelector('.milestone-board', { timeout: 8000 })
-  const boardCards = await page.$$eval('.milestone-card', (nodes) => nodes.length)
-  assert(boardCards === 2, `里程碑卡应为 2，实际 ${boardCards}`)
-  pass('里程碑视图', `${boardCards} 个里程碑`)
-
-  const columns = await page.$$('.direction-column')
-  const engineeringColumn = await (async () => {
-    for (const column of columns) {
-      const content = await column.evaluate((node) => (node.textContent ?? '').trim())
-      if (content.includes('软硬件全栈工程')) return column
-    }
-    throw new Error('未找到软硬件全栈工程列')
-  })()
-  const addButton = await engineeringColumn.$('button[aria-label="在此方向添加里程碑"]')
-  if (!addButton) throw new Error('方向列缺少添加里程碑按钮')
-  await addButton.click()
-
+  await clickAbilityControl(page, '产品设计与需求分析', '.ability-add-milestone')
   await page.waitForSelector('#milestone-name', { timeout: 8000 })
+  const linkedDirection = await page.$eval(
+    '#milestone-direction',
+    (element) => element.selectedOptions[0]?.textContent?.trim() ?? '',
+  )
+  const linkedCompetency = await page.$eval(
+    '#milestone-competency',
+    (element) => element.selectedOptions[0]?.textContent?.trim() ?? '',
+  )
+  assert(linkedDirection === '软硬件全栈工程', `里程碑未继承当前方向：${linkedDirection}`)
+  assert(linkedCompetency === '产品设计与需求分析', `里程碑未继承当前能力：${linkedCompetency}`)
   await setInput(page, '#milestone-name', '完成产品原型')
   await setInput(page, '#milestone-desc', '完成可演示的产品原型与一轮用户测试。')
   await setInput(page, '#milestone-start', '2027-01-10')
@@ -256,88 +321,147 @@ try {
   await clickText(page, '.modal-actions button', '添加里程碑')
   await waitText(page, '里程碑已添加', 15000)
   await waitModalClosed(page)
-  await waitText(page, '完成产品原型')
-  pass('创建里程碑', '归属软硬件全栈工程')
+  await ensureAbilityExpanded(page, '产品设计与需求分析')
+  await page.waitForFunction(
+    () => Array.from(document.querySelectorAll('.ability-milestone')).some(
+      (node) => (node.textContent ?? '').includes('完成产品原型'),
+    ),
+    { timeout: 8000 },
+  )
+  pass('能力里程碑创建', '里程碑与时间节点直接挂在能力节点下')
 
-  await clickCardAction(page, '.milestone-card', '完成产品原型', '编辑里程碑')
+  await page.evaluate(() => {
+    const milestone = Array.from(document.querySelectorAll('.ability-milestone')).find(
+      (node) => (node.textContent ?? '').includes('完成产品原型'),
+    )
+    if (!milestone) throw new Error('未找到完成产品原型里程碑')
+    milestone.click()
+  })
+  await page.waitForSelector('.drawer-panel', { timeout: 8000 })
+  await waitText(page, '验收条件')
+  await waitText(page, '关联能力')
+  await waitText(page, '产品设计与需求分析')
+  await clickText(page, '.drawer-panel button', '编辑里程碑')
   await page.waitForSelector('#milestone-status', { timeout: 8000 })
   await setSelect(page, '#milestone-status', 'COMPLETED')
   await clickText(page, '.modal-actions button', '保存修改')
   await waitText(page, '里程碑已更新', 15000)
   await waitModalClosed(page)
-  const completedCard = await page.$$eval('.milestone-card', (nodes) =>
-    nodes.find((node) => (node.textContent ?? '').includes('完成产品原型'))?.textContent ?? '',
+  await ensureAbilityExpanded(page, '产品设计与需求分析')
+  const completedMilestone = await page.evaluate(() => {
+    const node = Array.from(document.querySelectorAll('.ability-milestone')).find((item) =>
+      (item.textContent ?? '').includes('完成产品原型'),
+    )
+    return node?.querySelector('.milestone-status')?.textContent?.trim() ?? ''
+  })
+  assert(completedMilestone === '完成', `能力里程碑状态未更新：${completedMilestone}`)
+  pass('编辑能力里程碑状态')
+
+  const timelineDirectionOption = await page.$$eval(
+    'select[aria-label="时间线方向范围"] option',
+    (options) => {
+      const option = options.find((item) => (item.textContent ?? '').includes('软硬件全栈工程'))
+      return option ? { value: option.value, text: option.textContent?.trim() ?? '' } : null
+    },
   )
-  assert(completedCard.includes('完成'), '里程碑状态未更新为完成')
-  pass('编辑里程碑状态')
-
-  await clickText(page, '.view-tab', '时间线')
-  await page.waitForSelector('.timeline-table', { timeout: 8000 })
-  const yearBars = await page.$$eval('.timeline-bar', (nodes) => nodes.length)
-  assert(yearBars === 3, `年视图时间条应为 3，实际 ${yearBars}`)
-  const yearTicks = await page.$$eval('.tick', (nodes) => nodes.length)
-  await clickText(page, '.scale-switch button', '季度')
-  await delay(200)
-  const quarterTicks = await page.$$eval('.tick', (nodes) => nodes.length)
-  await clickText(page, '.scale-switch button', '月')
-  await delay(200)
-  const monthTicks = await page.$$eval('.tick', (nodes) => nodes.length)
-  assert(quarterTicks > yearTicks, '季度刻度未增加')
-  assert(monthTicks > quarterTicks, '月刻度未增加')
-  pass('多轨道时间线', `年 ${yearTicks} / 季度 ${quarterTicks} / 月 ${monthTicks} 个刻度，${yearBars} 条里程碑`)
-
-  await clickText(page, '.timeline-bar', '完成产品原型')
+  assert(timelineDirectionOption, '时间线缺少软硬件全栈工程筛选')
+  await setSelect(page, 'select[aria-label="时间线方向范围"]', timelineDirectionOption.value)
+  const timelineCompetencyOption = await page.$$eval(
+    'select[aria-label="时间线能力范围"] option',
+    (options) => {
+      const option = options.find((item) => (item.textContent ?? '').includes('产品设计与需求分析'))
+      return option ? { value: option.value, text: option.textContent?.trim() ?? '' } : null
+    },
+  )
+  assert(timelineCompetencyOption, '时间线缺少产品设计与需求分析筛选')
+  await setSelect(page, 'select[aria-label="时间线能力范围"]', timelineCompetencyOption.value)
+  await page.waitForFunction(
+    () => document.querySelectorAll('.s-timeline-node').length === 1,
+    { timeout: 8000 },
+  )
+  const timelineNodeText = await page.$eval(
+    '.s-timeline-node',
+    (node) => (node.textContent ?? '').trim(),
+  )
+  assert(timelineNodeText.includes('完成产品原型'), 'S 型时间线未显示新里程碑')
+  await page.click('.s-timeline-node')
   await page.waitForSelector('.drawer-panel', { timeout: 8000 })
   await waitText(page, '验收条件')
+  await waitText(page, '产品设计与需求分析')
   await page.click('.drawer-head button')
-  await page.waitForFunction(() => !document.querySelector('.drawer-panel'), {
-    timeout: 8000,
-  })
-  pass('时间线条目打开里程碑详情')
+  await page.waitForFunction(() => !document.querySelector('.drawer-panel'), { timeout: 8000 })
+  pass('S 型时间线筛选与详情', '方向 + 能力筛选收敛到新里程碑')
 
   await page.screenshot({ path: '/tmp/growth-os-roadmap.png', fullPage: true })
   pass('路线图截图', '/tmp/growth-os-roadmap.png')
 
-  await clickText(page, '.view-tab', '里程碑')
-  await delay(200)
-  await clickCardAction(page, '.milestone-card', '完成产品原型', '归档里程碑')
+  await page.evaluate(() => {
+    const milestone = Array.from(document.querySelectorAll('.ability-milestone')).find(
+      (node) => (node.textContent ?? '').includes('完成产品原型'),
+    )
+    if (!milestone) throw new Error('未找到用于归档的里程碑')
+    milestone.click()
+  })
+  await page.waitForSelector('.drawer-panel', { timeout: 8000 })
+  await clickText(page, '.drawer-panel button', '归档里程碑')
   await waitText(page, '归档内容')
   await clickText(page, '.modal-actions button', '确认归档')
   await waitText(page, '已归档，可随时恢复', 15000)
   await waitModalClosed(page)
   await delay(250)
-  const hiddenMilestone = await page.$$eval('.milestone-card', (nodes) =>
+  let hiddenMilestone = await page.$$eval('.ability-milestone', (nodes) =>
     nodes.some((node) => (node.textContent ?? '').includes('完成产品原型')),
   )
   assert(!hiddenMilestone, '归档里程碑仍显示')
-  await clickText(page, '.toolbar-actions button', '显示已归档')
-  await delay(250)
-  await clickCardAction(page, '.milestone-card', '完成产品原型', '恢复里程碑')
+  await clickText(page, '.toolbar-actions button', '显示归档')
+  await ensureAbilityExpanded(page, '产品设计与需求分析')
+  await page.waitForFunction(
+    () => Array.from(document.querySelectorAll('.ability-milestone')).some(
+      (node) => (node.textContent ?? '').includes('完成产品原型'),
+    ),
+    { timeout: 8000 },
+  )
+  await page.evaluate(() => {
+    const milestone = Array.from(document.querySelectorAll('.ability-milestone')).find(
+      (node) => (node.textContent ?? '').includes('完成产品原型'),
+    )
+    if (!milestone) throw new Error('未找到已归档的里程碑')
+    milestone.click()
+  })
+  await page.waitForSelector('.drawer-panel', { timeout: 8000 })
+  await clickText(page, '.drawer-panel button', '恢复里程碑')
   await waitText(page, '恢复内容')
   await clickText(page, '.modal-actions button', '确认恢复')
   await waitText(page, '已恢复', 15000)
   await waitModalClosed(page)
+  await clickText(page, '.toolbar-actions button', '隐藏归档')
   pass('归档与恢复里程碑')
 
-  const filterOptions = await page.$$eval('select.direction-filter option', (options) =>
+  const filterOptions = await page.$$eval('select[aria-label="按方向筛选"] option', (options) =>
     options.map((option) => ({ value: option.value, text: option.textContent.trim() })),
   )
   const researchOption = filterOptions.find((option) => option.text.includes('研究生'))
   assert(researchOption, '未找到研究生方向筛选项')
-  await setSelect(page, 'select.direction-filter', researchOption.value)
-  await delay(300)
-  const filteredColumns = await page.$$eval('.direction-column', (nodes) => nodes.length)
-  assert(filteredColumns === 1, `方向筛选后应只剩 1 列，实际 ${filteredColumns}`)
-  await setSelect(page, 'select.direction-filter', 'all')
+  await setSelect(page, 'select[aria-label="按方向筛选"]', researchOption.value)
+  await page.waitForFunction(
+    () => document.querySelectorAll('.direction-card').length === 1,
+    { timeout: 8000 },
+  )
   pass('方向筛选')
+  await setSelect(page, 'select[aria-label="按方向筛选"]', 'all')
 
   await page.reload({ waitUntil: 'networkidle0' })
-  await page.waitForSelector('.map-card', { timeout: 15000 })
+  await page.waitForSelector('.direction-card', { timeout: 15000 })
+  assert(
+    (await page.$$eval('.direction-body', (nodes) => nodes.length)) === 0,
+    '刷新后路线图应恢复为默认折叠',
+  )
+  await clickText(page, '.direction-summary', '软硬件全栈工程')
   await waitText(page, '产品设计与需求分析')
+  await ensureAbilityExpanded(page, '产品设计与需求分析')
   await waitText(page, '用户访谈')
-  await clickText(page, '.view-tab', '里程碑')
   await waitText(page, '完成产品原型')
-  pass('刷新后持久化')
+  pass('刷新后持久化', '能力、子能力、里程碑与能力归属均保留')
 
   assert(
     consoleErrors.length === 0,

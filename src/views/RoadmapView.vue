@@ -1,17 +1,18 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppIcon from '@/components/AppIcon.vue'
-import CompetencyTreeNode from '@/components/CompetencyTreeNode.vue'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import ModalDialog from '@/components/ModalDialog.vue'
+import RoadmapAbilityNode from '@/components/RoadmapAbilityNode.vue'
 import { useToast } from '@/composables/useToast'
 import {
   levelIndex,
   levelPercent,
   useRoadmap,
   type CompetencyInput,
+  type CompetencyNode,
   type DirectionAssignmentInput,
   type MilestoneInput,
   type RoadmapKind,
@@ -31,12 +32,13 @@ import {
   priorityLabels,
   type Competency,
   type Direction,
-  type DirectionCompetency,
   type Milestone,
 } from '@/domain'
 import { formatDate, formatShortDate, fromDateInput, relativeDay, toDateInput } from '@/utils/date'
 
 const { success, error: toastError } = useToast()
+const route = useRoute()
+const router = useRouter()
 
 const {
   loading,
@@ -51,13 +53,12 @@ const {
   visibleMilestones,
   assignmentsByCompetency,
   evidenceCounts,
-  competencyTree,
+  directionCompetencyTree,
   selectedDirectionId,
   includeArchived,
   inProgressMilestones,
   coveredDirectionCount,
   milestonesOfDirection,
-  descendantsOf,
   linkedGoalsForMilestone,
   growthHistoryFor,
   refresh,
@@ -65,17 +66,8 @@ const {
   saveMilestone,
   moveMilestone,
   setArchived,
+  descendantsOf,
 } = useRoadmap()
-
-type RoadmapView = 'map' | 'milestones' | 'timeline'
-type TimelineScale = 'year' | 'quarter' | 'month' | 'week'
-
-const activeView = ref<RoadmapView>('map')
-const route = useRoute()
-const router = useRouter()
-const timelineScale = ref<TimelineScale>('year')
-const milestoneStatusFilter = ref<'ALL' | MilestoneStatus>('ALL')
-const importanceFilter = ref<'ALL' | Importance>('ALL')
 
 const categories = Object.values(CompetencyCategory)
 const levels = Object.values(CompetencyLevel)
@@ -94,12 +86,14 @@ const milestoneStatuses = [
 ]
 const importances = [Importance.CRITICAL, Importance.IMPORTANT, Importance.NORMAL]
 const relationPriorities = [Priority.HIGH, Priority.MEDIUM, Priority.LOW]
-const priorityOrder: Record<Priority, number> = {
-  [Priority.LOW]: 1,
-  [Priority.MEDIUM]: 2,
-  [Priority.HIGH]: 3,
-  [Priority.URGENT]: 4,
-}
+const milestoneStatusFilter = ref<'ALL' | MilestoneStatus>('ALL')
+const importanceFilter = ref<'ALL' | Importance>('ALL')
+const timelineDirectionId = ref('all')
+const timelineCompetencyId = ref('all')
+const timelineStatusFilter = ref<'ALL' | MilestoneStatus>('ALL')
+const expandedDirectionIds = reactive<Record<string, boolean>>({})
+const focusedCompetencyId = ref<string | null>(null)
+const timelineColumns = ref(3)
 
 const archivedCount = computed(
   () =>
@@ -133,153 +127,242 @@ const filteredMilestones = computed(() =>
   visibleMilestones.value.filter(milestoneMatchesFilters),
 )
 
-function boardMilestones(directionId: string): Milestone[] {
-  return milestonesOfDirection(directionId).filter(milestoneMatchesFilters)
+function flattenNodes(nodes: CompetencyNode[]): CompetencyNode[] {
+  return nodes.flatMap((node) => [node, ...flattenNodes(node.children)])
 }
 
-const hasMilestoneFilters = computed(
-  () => milestoneStatusFilter.value !== 'ALL' || importanceFilter.value !== 'ALL',
-)
+const milestonesByCompetency = computed<Record<string, Milestone[]>>(() => {
+  const result: Record<string, Milestone[]> = {}
+  for (const milestone of filteredMilestones.value) {
+    if (!milestone.competencyId) continue
+    const key = `${milestone.directionId}:${milestone.competencyId}`
+    if (!result[key]) result[key] = []
+    result[key].push(milestone)
+  }
+  for (const rows of Object.values(result)) {
+    rows.sort((left, right) => {
+      const leftDate = left.dueDate ?? left.startDate ?? '9999-12-31'
+      const rightDate = right.dueDate ?? right.startDate ?? '9999-12-31'
+      return leftDate.localeCompare(rightDate) || left.name.localeCompare(right.name, 'zh-CN')
+    })
+  }
+  return result
+})
 
-interface DirectionCompetencySummary {
+function requiredLevelsForDirection(directionId: string): Record<string, CompetencyLevel> {
+  const result: Record<string, CompetencyLevel> = {}
+  for (const relation of relations.value) {
+    if (!relation.archivedAt && relation.directionId === directionId) {
+      result[relation.competencyId] = relation.requiredLevel
+    }
+  }
+  return result
+}
+
+function unlinkedMilestones(directionId: string): Milestone[] {
+  return filteredMilestones.value.filter(
+    (milestone) => milestone.directionId === directionId && !milestone.competencyId,
+  )
+}
+
+interface DirectionSummary {
   direction: Direction
-  currentPoints: number
-  requiredPoints: number
-  completed: number
-  total: number
+  competencyCount: number
+  milestoneCount: number
+  completedCount: number
+  unlinkedCount: number
+  nextMilestone: Milestone | null
   percent: number
+  completedCompetencies: number
 }
 
-const directionCompetencySummaries = computed<DirectionCompetencySummary[]>(() => {
+const directionSummaries = computed<DirectionSummary[]>(() => {
   const competencyById = new Map(
     visibleCompetencies.value.map((competency) => [competency.id, competency]),
   )
 
   return filteredDirections.value.map((direction) => {
+    const tree = directionCompetencyTree(direction.id)
+    const allNodes = flattenNodes(tree)
+    const directionMilestones = milestonesOfDirection(direction.id).filter(milestoneMatchesFilters)
+    const relationRows = relations.value.filter(
+      (relation) => !relation.archivedAt && relation.directionId === direction.id,
+    )
     let currentPoints = 0
     let requiredPoints = 0
-    let completed = 0
-    let total = 0
+    let completedCompetencies = 0
 
-    for (const relation of relations.value) {
-      if (relation.archivedAt || relation.directionId !== direction.id) continue
+    for (const relation of relationRows) {
       const competency = competencyById.get(relation.competencyId)
       if (!competency) continue
-
       const required = levelIndex(relation.requiredLevel)
       const current = levelIndex(competency.currentLevel)
       currentPoints += Math.min(current, required)
       requiredPoints += required
-      total += 1
-      if (current >= required) completed += 1
+      if (current >= required) completedCompetencies += 1
     }
+
+    const upcoming = directionMilestones.find(
+      (milestone) =>
+        milestone.status !== MilestoneStatus.COMPLETED &&
+        milestone.status !== MilestoneStatus.CANCELLED,
+    )
 
     return {
       direction,
-      currentPoints,
-      requiredPoints,
-      completed,
-      total,
+      competencyCount: allNodes.length,
+      milestoneCount: directionMilestones.length,
+      completedCount: directionMilestones.filter(
+        (milestone) => milestone.status === MilestoneStatus.COMPLETED,
+      ).length,
+      unlinkedCount: directionMilestones.filter((milestone) => !milestone.competencyId).length,
+      nextMilestone: upcoming ?? directionMilestones.at(-1) ?? null,
       percent: requiredPoints > 0 ? Math.round((currentPoints / requiredPoints) * 100) : 0,
+      completedCompetencies,
     }
   })
 })
 
-interface RoadmapStage {
-  id: string
-  index: number
-  label: string
-  startDate: string | null
-  endDate: string | null
-  startMilestone: Milestone | null
-  endMilestone: Milestone
-}
-
-function milestoneAnchor(milestone: Milestone): string | null {
-  return milestone.dueDate ?? milestone.startDate
-}
-
-const stagesByDirection = computed<Record<string, RoadmapStage[]>>(() => {
-  const result: Record<string, RoadmapStage[]> = {}
-
-  for (const direction of activeDirections.value) {
-    const directionMilestones = filteredMilestones.value
-      .filter((milestone) => milestone.directionId === direction.id && !milestone.archivedAt)
-      .slice()
-      .sort((left, right) => {
-        const leftAnchor = milestoneAnchor(left) ?? '9999-12-31'
-        const rightAnchor = milestoneAnchor(right) ?? '9999-12-31'
-        return leftAnchor.localeCompare(rightAnchor)
-      })
-
-    result[direction.id] = directionMilestones.map((milestone, index) => {
-      const previous = index > 0 ? directionMilestones[index - 1] : null
-      const startDate =
-        index === 0
-          ? direction.startDate ?? milestone.startDate ?? milestone.dueDate
-          : previous?.dueDate ?? previous?.startDate ?? null
-      const endDate = milestoneAnchor(milestone)
-
-      return {
-        id: `${direction.id}:${milestone.id}`,
-        index: index + 1,
-        label:
-          index === 0
-            ? `方向启动 → ${milestone.name}`
-            : `${previous?.name ?? '上一里程碑'} → ${milestone.name}`,
-        startDate,
-        endDate,
-        startMilestone: previous,
-        endMilestone: milestone,
-      }
-    })
-  }
-
-  return result
+const directionSummaryMap = computed<Record<string, DirectionSummary>>(() => {
+  const map: Record<string, DirectionSummary> = {}
+  for (const summary of directionSummaries.value) map[summary.direction.id] = summary
+  return map
 })
 
-function stagesOfDirection(directionId: string): RoadmapStage[] {
-  return stagesByDirection.value[directionId] ?? []
+function toggleDirection(directionId: string): void {
+  expandedDirectionIds[directionId] = !expandedDirectionIds[directionId]
 }
 
-const detailMilestoneCompetencies = computed(() => {
-  const directionId = detailMilestone.value?.directionId
-  if (!directionId) return []
+function openDirection(directionId: string): void {
+  expandedDirectionIds[directionId] = true
+}
+
+function directionNodeCount(directionId: string): number {
+  return flattenNodes(directionCompetencyTree(directionId)).length
+}
+
+const timelineCompetencyOptions = computed(() => {
+  const allowedDirectionIds =
+    timelineDirectionId.value === 'all'
+      ? new Set(activeDirections.value.map((direction) => direction.id))
+      : new Set([timelineDirectionId.value])
 
   return visibleCompetencies.value
-    .map((competency) => {
-      const assignment = (assignmentsByCompetency.value[competency.id] ?? []).find(
-        (relation) => relation.directionId === directionId,
-      )
-      return assignment ? { competency, assignment } : null
-    })
-    .filter(
-      (
-        item,
-      ): item is {
-        competency: Competency
-        assignment: DirectionCompetency
-      } => item !== null,
+    .filter((competency) =>
+      (assignmentsByCompetency.value[competency.id] ?? []).some((relation) =>
+        allowedDirectionIds.has(relation.directionId),
+      ),
     )
-    .sort(
-      (left, right) =>
-        priorityOrder[right.assignment.priority] - priorityOrder[left.assignment.priority],
-    )
+    .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
 })
+
+interface TimelineItem {
+  milestone: Milestone
+  direction: Direction | undefined
+  competency: Competency | undefined
+  date: string
+  order: number
+}
+
+const timelineItems = computed<TimelineItem[]>(() => {
+  const rows = visibleMilestones.value
+    .filter((milestone) => {
+      if (timelineStatusFilter.value !== 'ALL' && milestone.status !== timelineStatusFilter.value) {
+        return false
+      }
+      if (
+        timelineDirectionId.value !== 'all' &&
+        milestone.directionId !== timelineDirectionId.value
+      ) {
+        return false
+      }
+      if (
+        timelineCompetencyId.value !== 'all' &&
+        milestone.competencyId !== timelineCompetencyId.value
+      ) {
+        return false
+      }
+      return Boolean(milestone.dueDate ?? milestone.startDate)
+    })
+    .slice()
+    .sort((left, right) => {
+      const leftDate = left.dueDate ?? left.startDate ?? '9999-12-31'
+      const rightDate = right.dueDate ?? right.startDate ?? '9999-12-31'
+      return leftDate.localeCompare(rightDate) || left.name.localeCompare(right.name, 'zh-CN')
+    })
+
+  return rows.map((milestone, index) => ({
+    milestone,
+    direction: directionMap.value[milestone.directionId],
+    competency: milestone.competencyId
+      ? competencies.value.find((item) => item.id === milestone.competencyId)
+      : undefined,
+    date: milestone.dueDate ?? milestone.startDate ?? '',
+    order: index + 1,
+  }))
+})
+
+interface TimelineSnakeRow {
+  items: TimelineItem[]
+  index: number
+}
+
+const sTimelineRows = computed<TimelineSnakeRow[]>(() => {
+  const size = Math.max(1, timelineColumns.value)
+  const rows: TimelineSnakeRow[] = []
+  for (let index = 0; index < timelineItems.value.length; index += size) {
+    const items = timelineItems.value.slice(index, index + size)
+    if (rows.length % 2 === 1) items.reverse()
+    rows.push({ items, index: rows.length })
+  }
+  return rows
+})
+
+const timelineScopeLabel = computed(() => {
+  if (timelineCompetencyId.value !== 'all') {
+    return competencies.value.find((item) => item.id === timelineCompetencyId.value)?.name ?? '指定能力'
+  }
+  if (timelineDirectionId.value !== 'all') {
+    return directionMap.value[timelineDirectionId.value]?.name ?? '指定方向'
+  }
+  return '全部发展方向'
+})
+
+const undatedMilestoneCount = computed(
+  () =>
+    visibleMilestones.value.filter(
+      (milestone) =>
+        !milestone.dueDate &&
+        !milestone.startDate &&
+        (timelineDirectionId.value === 'all' ||
+          milestone.directionId === timelineDirectionId.value) &&
+        (timelineCompetencyId.value === 'all' ||
+          milestone.competencyId === timelineCompetencyId.value),
+    ).length,
+)
+
+watch(timelineDirectionId, () => {
+  if (
+    timelineCompetencyId.value !== 'all' &&
+    !timelineCompetencyOptions.value.some((competency) => competency.id === timelineCompetencyId.value)
+  ) {
+    timelineCompetencyId.value = 'all'
+  }
+})
+
+function syncTimelineColumns(): void {
+  timelineColumns.value = window.innerWidth <= 760 ? 1 : window.innerWidth <= 1120 ? 2 : 3
+}
 
 const detailCompetencyId = ref<string | null>(null)
 const detailMilestoneId = ref<string | null>(null)
 
 const detailCompetency = computed(
-  () =>
-    competencies.value.find((competency) => competency.id === detailCompetencyId.value) ??
-    null,
+  () => competencies.value.find((competency) => competency.id === detailCompetencyId.value) ?? null,
 )
 
 const detailAssignments = computed(() =>
-  detailCompetency.value
-    ? assignmentsByCompetency.value[detailCompetency.value.id] ?? []
-    : [],
+  detailCompetency.value ? assignmentsByCompetency.value[detailCompetency.value.id] ?? [] : [],
 )
 
 const detailGrowth = computed(() =>
@@ -306,20 +389,25 @@ const detailMilestone = computed(
   () => milestones.value.find((milestone) => milestone.id === detailMilestoneId.value) ?? null,
 )
 
+const detailMilestoneDirection = computed(() =>
+  detailMilestone.value ? directionMap.value[detailMilestone.value.directionId] : undefined,
+)
+
+const detailMilestoneCompetency = computed(() =>
+  detailMilestone.value?.competencyId
+    ? competencies.value.find((competency) => competency.id === detailMilestone.value?.competencyId) ??
+      null
+    : null,
+)
+
 const detailDirectionSummary = computed(() =>
   detailMilestone.value
-    ? directionCompetencySummaries.value.find(
-        (summary) => summary.direction.id === detailMilestone.value?.directionId,
-      ) ?? null
+    ? directionSummaryMap.value[detailMilestone.value.directionId] ?? null
     : null,
 )
 
 const detailMilestoneGoals = computed(() =>
   detailMilestone.value ? linkedGoalsForMilestone(detailMilestone.value.id) : [],
-)
-
-const detailMilestoneDirection = computed(() =>
-  detailMilestone.value ? directionMap.value[detailMilestone.value.directionId] : undefined,
 )
 
 function openCompetencyDetail(competency: Competency): void {
@@ -339,9 +427,7 @@ function editCompetencyFromDetail(): void {
 function archiveCompetencyFromDetail(): void {
   const competency = detailCompetency.value
   closeCompetencyDetail()
-  if (competency) {
-    askToggle('competency', competency.id, competency.name, competency.archivedAt)
-  }
+  if (competency) askToggle('competency', competency.id, competency.name, competency.archivedAt)
 }
 
 function openMilestoneDetail(milestone: Milestone): void {
@@ -361,15 +447,10 @@ function editMilestoneFromDetail(): void {
 function archiveMilestoneFromDetail(): void {
   const milestone = detailMilestone.value
   closeMilestoneDetail()
-  if (milestone) {
-    askToggle('milestone', milestone.id, milestone.name, milestone.archivedAt)
-  }
+  if (milestone) askToggle('milestone', milestone.id, milestone.name, milestone.archivedAt)
 }
 
-async function shiftMilestoneDate(
-  milestone: Milestone,
-  deltaDays: number,
-): Promise<void> {
+async function shiftMilestoneDate(milestone: Milestone, deltaDays: number): Promise<void> {
   if (!milestone.startDate && !milestone.dueDate) {
     toastError('请先为里程碑设置开始或截止日期')
     return
@@ -379,105 +460,6 @@ async function shiftMilestoneDate(
     success(`「${milestone.name}」已${deltaDays < 0 ? '提前' : '延后'} ${Math.abs(deltaDays)} 天`)
   } catch (caught) {
     toastError(caught instanceof Error ? caught.message : String(caught))
-  }
-}
-
-function shiftStageBoundary(
-  stage: RoadmapStage,
-  boundary: 'start' | 'end',
-  deltaDays: number,
-): void {
-  const milestone = boundary === 'start' ? stage.startMilestone : stage.endMilestone
-  if (milestone) void shiftMilestoneDate(milestone, deltaDays)
-}
-
-const draggingMilestoneId = ref<string | null>(null)
-const dragOffsetPx = ref(0)
-let dragStartX = 0
-let dragTrackWidth = 0
-let dragMoved = false
-let suppressTimelineClick = false
-let suppressTimer: ReturnType<typeof setTimeout> | null = null
-
-function onTimelinePointerDown(event: PointerEvent, bar: TimelineBar): void {
-  if (event.button !== 0) return
-  const track = (event.currentTarget as HTMLElement | null)?.parentElement
-  if (!track) return
-  dragStartX = event.clientX
-  dragTrackWidth = track.getBoundingClientRect().width
-  dragMoved = false
-  dragOffsetPx.value = 0
-  draggingMilestoneId.value = bar.milestone.id
-  window.addEventListener('pointermove', onTimelinePointerMove)
-  window.addEventListener('pointerup', onTimelinePointerUp)
-  event.preventDefault()
-}
-
-function onTimelinePointerMove(event: PointerEvent): void {
-  dragOffsetPx.value = event.clientX - dragStartX
-  if (Math.abs(dragOffsetPx.value) > 3) dragMoved = true
-}
-
-async function onTimelinePointerUp(): Promise<void> {
-  window.removeEventListener('pointermove', onTimelinePointerMove)
-  window.removeEventListener('pointerup', onTimelinePointerUp)
-  const id = draggingMilestoneId.value
-  const offset = dragOffsetPx.value
-  const moved = dragMoved
-  const width = dragTrackWidth
-  draggingMilestoneId.value = null
-  dragOffsetPx.value = 0
-  dragMoved = false
-  dragTrackWidth = 0
-  if (!id || !moved || width <= 0) return
-
-  const rangeDays =
-    (timelineRange.value.end.getTime() - timelineRange.value.start.getTime()) / 86400000
-  const deltaDays = Math.round((offset / width) * rangeDays)
-  if (deltaDays === 0) return
-
-  suppressTimelineClick = true
-  if (suppressTimer) clearTimeout(suppressTimer)
-  suppressTimer = setTimeout(() => {
-    suppressTimelineClick = false
-  }, 260)
-
-  try {
-    await moveMilestone(id, deltaDays)
-    success(`里程碑日期已调整 ${deltaDays > 0 ? '+' : ''}${deltaDays} 天`)
-  } catch (caught) {
-    toastError(caught instanceof Error ? caught.message : String(caught))
-  }
-}
-
-function handleTimelineBarClick(bar: TimelineBar): void {
-  if (suppressTimelineClick) {
-    suppressTimelineClick = false
-    return
-  }
-  openMilestoneDetail(bar.milestone)
-}
-
-function timelineBarStyle(bar: TimelineBar): Record<string, string> {
-  const style: Record<string, string> = {
-    left: `${bar.startPercent}%`,
-    width: `${bar.widthPercent}%`,
-    '--bar-color': directionMap.value[bar.milestone.directionId]?.color ?? '#3563e9',
-  }
-  if (draggingMilestoneId.value === bar.milestone.id) {
-    style.transform = `translateX(${dragOffsetPx.value}px)`
-  }
-  return style
-}
-
-function timelinePhaseStyle(
-  phase: TimelinePhase,
-  direction: Direction,
-): Record<string, string> {
-  return {
-    left: `${phase.startPercent}%`,
-    width: `${phase.widthPercent}%`,
-    '--phase-color': direction.color,
   }
 }
 
@@ -515,6 +497,7 @@ interface MilestoneForm {
   name: string
   description: string
   directionId: string
+  competencyId: string
   importance: Importance
   status: MilestoneStatus
   startDate: string
@@ -527,6 +510,7 @@ function emptyMilestoneForm(): MilestoneForm {
     name: '',
     description: '',
     directionId: '',
+    competencyId: '',
     importance: Importance.IMPORTANT,
     status: MilestoneStatus.NOT_STARTED,
     startDate: '',
@@ -554,10 +538,10 @@ const modalTitle = computed(() => {
 
 const modalSubtitle = computed(() => {
   if (modalKind.value === 'competency') {
-    return '能力可以属于多个发展方向，等级必须以评价标准和成果证据为依据。'
+    return '能力可以属于多个发展方向；能力树负责组织，里程碑负责标记它的阶段成果。'
   }
   if (modalKind.value === 'milestone') {
-    return '里程碑表示阶段性成果，必须属于一个发展方向，而不是普通待办。'
+    return '里程碑归属于一个方向，并可进一步关联该方向下的一个具体能力。'
   }
   return ''
 })
@@ -573,9 +557,7 @@ const blockedParentIds = computed(() => {
 
 const parentOptions = computed(() =>
   competencies.value
-    .filter(
-      (competency) => !competency.archivedAt && !blockedParentIds.value.has(competency.id),
-    )
+    .filter((competency) => !competency.archivedAt && !blockedParentIds.value.has(competency.id))
     .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN')),
 )
 
@@ -583,7 +565,32 @@ const milestoneDirectionOptions = computed(() =>
   directions.value.filter((direction) => !direction.archivedAt),
 )
 
-function toggleDirection(directionId: string, event: Event): void {
+const milestoneCompetencyOptions = computed(() => {
+  if (!milestoneForm.directionId) return []
+  return visibleCompetencies.value
+    .filter((competency) =>
+      (assignmentsByCompetency.value[competency.id] ?? []).some(
+        (relation) => relation.directionId === milestoneForm.directionId,
+      ),
+    )
+    .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
+})
+
+watch(
+  () => milestoneForm.directionId,
+  () => {
+    if (
+      milestoneForm.competencyId &&
+      !milestoneCompetencyOptions.value.some(
+        (competency) => competency.id === milestoneForm.competencyId,
+      )
+    ) {
+      milestoneForm.competencyId = ''
+    }
+  },
+)
+
+function toggleDirectionAssignment(directionId: string, event: Event): void {
   const checked = (event.target as HTMLInputElement).checked
   if (checked) {
     if (!competencyForm.selectedDirectionIds.includes(directionId)) {
@@ -608,10 +615,17 @@ function resetModal(): void {
   formError.value = ''
 }
 
-function openCompetencyCreate(parent?: Competency): void {
+function openCompetencyCreate(parent?: Competency, directionId?: string): void {
   editingId.value = null
   Object.assign(competencyForm, emptyCompetencyForm())
   if (parent) competencyForm.parentId = parent.id
+  const preferredDirectionId =
+    directionId ?? (selectedDirectionId.value !== 'all' ? selectedDirectionId.value : '')
+  if (preferredDirectionId) {
+    competencyForm.selectedDirectionIds = [preferredDirectionId]
+    competencyForm.requiredLevels[preferredDirectionId] = competencyForm.targetLevel
+    competencyForm.priorities[preferredDirectionId] = Priority.MEDIUM
+  }
   formError.value = ''
   modalKind.value = 'competency'
 }
@@ -676,7 +690,7 @@ async function submitCompetency(): Promise<void> {
   }
 }
 
-function openMilestoneCreate(directionId?: string): void {
+function openMilestoneCreate(directionId?: string, competencyId?: string): void {
   editingId.value = null
   Object.assign(milestoneForm, emptyMilestoneForm())
   milestoneForm.directionId =
@@ -684,6 +698,7 @@ function openMilestoneCreate(directionId?: string): void {
     (selectedDirectionId.value !== 'all'
       ? selectedDirectionId.value
       : activeDirections.value[0]?.id ?? '')
+  if (competencyId) milestoneForm.competencyId = competencyId
   formError.value = ''
   modalKind.value = 'milestone'
 }
@@ -694,6 +709,7 @@ function openMilestoneEdit(milestone: Milestone): void {
     name: milestone.name,
     description: milestone.description,
     directionId: milestone.directionId,
+    competencyId: milestone.competencyId ?? '',
     importance: milestone.importance,
     status: milestone.status,
     startDate: toDateInput(milestone.startDate),
@@ -724,6 +740,7 @@ async function submitMilestone(): Promise<void> {
   try {
     const payload: MilestoneInput = {
       directionId: milestoneForm.directionId,
+      competencyId: milestoneForm.competencyId || null,
       name: milestoneForm.name.trim(),
       description: milestoneForm.description.trim(),
       startDate,
@@ -752,9 +769,7 @@ const confirmTarget = ref<{
   archived: boolean
 } | null>(null)
 
-const confirmTitle = computed(() =>
-  confirmTarget.value?.archived ? '恢复内容' : '归档内容',
-)
+const confirmTitle = computed(() => (confirmTarget.value?.archived ? '恢复内容' : '归档内容'))
 
 const confirmText = computed(() => {
   const target = confirmTarget.value
@@ -783,206 +798,9 @@ async function runToggle(): Promise<void> {
   }
 }
 
-interface TimelineTick {
-  key: string
-  label: string
-  percent: number
-  major: boolean
-}
-
-const timelineRange = computed(() => {
-  const timestamps: number[] = [Date.now()]
-  for (const milestone of visibleMilestones.value) {
-    if (milestone.startDate) timestamps.push(new Date(milestone.startDate).getTime())
-    if (milestone.dueDate) timestamps.push(new Date(milestone.dueDate).getTime())
-  }
-  for (const direction of activeDirections.value) {
-    if (direction.startDate) timestamps.push(new Date(direction.startDate).getTime())
-    if (direction.targetDate) timestamps.push(new Date(direction.targetDate).getTime())
-  }
-  const min = Math.min(...timestamps)
-  const max = Math.max(...timestamps)
-  const start = new Date(min)
-  start.setMonth(0, 1)
-  start.setHours(0, 0, 0, 0)
-  const end = new Date(max)
-  end.setMonth(11, 31)
-  end.setHours(23, 59, 59, 999)
-  if (end.getTime() <= start.getTime()) {
-    end.setFullYear(start.getFullYear() + 1)
-  }
-  return { start, end }
-})
-
-function percentOfDate(value: Date | string): number {
-  const date = value instanceof Date ? value : new Date(value)
-  const { start, end } = timelineRange.value
-  const ratio = (date.getTime() - start.getTime()) / (end.getTime() - start.getTime())
-  return Math.max(0, Math.min(100, ratio * 100))
-}
-
-const timelineTicks = computed<TimelineTick[]>(() => {
-  const { start, end } = timelineRange.value
-  const result: TimelineTick[] = []
-  const startYear = start.getFullYear()
-  const endYear = end.getFullYear()
-
-  if (timelineScale.value === 'year') {
-    for (let year = startYear; year <= endYear; year += 1) {
-      const date = new Date(year, 0, 1)
-      result.push({
-        key: `y-${year}`,
-        label: `${year}`,
-        percent: percentOfDate(date),
-        major: true,
-      })
-    }
-    return result
-  }
-
-  if (timelineScale.value === 'quarter') {
-    for (let year = startYear; year <= endYear; year += 1) {
-      for (let quarter = 0; quarter < 4; quarter += 1) {
-        const date = new Date(year, quarter * 3, 1)
-        if (date < start || date > end) continue
-        result.push({
-          key: `q-${year}-${quarter}`,
-          label: `${year} Q${quarter + 1}`,
-          percent: percentOfDate(date),
-          major: quarter === 0,
-        })
-      }
-    }
-    return result
-  }
-
-  if (timelineScale.value === 'week') {
-    const cursor = new Date(start)
-    const offset = (cursor.getDay() + 6) % 7
-    cursor.setDate(cursor.getDate() - offset)
-    let lastMonth = -1
-    while (cursor <= end) {
-      if (cursor >= start) {
-        const monthChanged = cursor.getMonth() !== lastMonth
-        if (monthChanged) lastMonth = cursor.getMonth()
-        result.push({
-          key: `w-${cursor.getFullYear()}-${cursor.getMonth()}-${cursor.getDate()}`,
-          label: `${cursor.getMonth() + 1}/${cursor.getDate()}`,
-          percent: percentOfDate(cursor),
-          major: monthChanged,
-        })
-      }
-      cursor.setDate(cursor.getDate() + 7)
-    }
-    return result
-  }
-
-  for (let year = startYear; year <= endYear; year += 1) {
-    for (let month = 0; month < 12; month += 1) {
-      const date = new Date(year, month, 1)
-      if (date < start || date > end) continue
-      result.push({
-        key: `m-${year}-${month}`,
-        label: month === 0 ? `${year}` : `${month + 1}月`,
-        percent: percentOfDate(date),
-        major: month === 0,
-      })
-    }
-  }
-  return result
-})
-
-const timelineWidth = computed(() => {
-  if (timelineScale.value === 'year') return 880
-  if (timelineScale.value === 'quarter') {
-    return Math.max(880, timelineTicks.value.length * 104)
-  }
-  if (timelineScale.value === 'week') {
-    return Math.max(1200, timelineTicks.value.length * 48)
-  }
-  return Math.max(980, timelineTicks.value.length * 62)
-})
-
-interface TimelineBar {
-  milestone: Milestone
-  startPercent: number
-  widthPercent: number
-}
-
-interface TimelinePhase {
-  stage: RoadmapStage
-  startPercent: number
-  widthPercent: number
-}
-
-const timelineRows = computed(() =>
-  filteredDirections.value.map((direction) => {
-    const bars: TimelineBar[] = filteredMilestones.value
-      .filter(
-        (milestone) =>
-          milestone.directionId === direction.id &&
-          (milestone.startDate !== null || milestone.dueDate !== null),
-      )
-      .map((milestone) => {
-        const startValue = milestone.startDate ?? milestone.dueDate ?? ''
-        const endValue = milestone.dueDate ?? milestone.startDate ?? ''
-        const startPercent = percentOfDate(startValue)
-        const endPercent = percentOfDate(endValue)
-        return {
-          milestone,
-          startPercent,
-          widthPercent: Math.max(endPercent - startPercent, 1.4),
-        }
-      })
-      .sort((left, right) => left.startPercent - right.startPercent)
-
-    const phases: TimelinePhase[] = stagesOfDirection(direction.id)
-      .filter((stage) => stage.startDate !== null && stage.endDate !== null)
-      .map((stage) => {
-        const startPercent = percentOfDate(stage.startDate as string)
-        const endPercent = percentOfDate(stage.endDate as string)
-        return {
-          stage,
-          startPercent: Math.min(startPercent, endPercent),
-          widthPercent: Math.max(Math.abs(endPercent - startPercent), 1.4),
-        }
-      })
-
-    return { direction, bars, phases }
-  }),
-)
-
-const hasTimelineItems = computed(() =>
-  timelineRows.value.some((row) => row.bars.length > 0),
-)
-
-const todayPercent = computed(() => {
-  const value = percentOfDate(new Date())
-  return value > 0 && value < 100 ? value : null
-})
-
-const timelineScroll = ref<HTMLElement | null>(null)
-
-async function scrollToToday(): Promise<void> {
-  await nextTick()
-  const element = timelineScroll.value
-  const percent = todayPercent.value
-  if (!element || percent === null) return
-  const trackWidth = Math.max(0, element.scrollWidth - 180)
-  const target = 180 + trackWidth * (percent / 100) - element.clientWidth / 2
-  element.scrollTo({ left: Math.max(0, target), behavior: 'smooth' })
-}
-
-function changeTimelineScale(scale: TimelineScale): void {
-  timelineScale.value = scale
-  void scrollToToday()
-}
-
-watch(timelineScale, () => {
-  void scrollToToday()
-})
-
 onMounted(async () => {
+  syncTimelineColumns()
+  window.addEventListener('resize', syncTimelineColumns)
   await refresh()
 
   let handledDeepLink = false
@@ -992,9 +810,27 @@ onMounted(async () => {
     const direction = activeDirections.value.find((item) => item.id === directionParam)
     if (direction) {
       selectedDirectionId.value = direction.id
-      activeView.value = 'map'
+      openDirection(direction.id)
     } else {
       toastError('这个发展方向不存在或已经归档')
+    }
+  }
+
+  const competencyParam = String(route.query.competency ?? '')
+  if (competencyParam) {
+    handledDeepLink = true
+    const competency = competencies.value.find((item) => item.id === competencyParam)
+    const relation = relations.value.find(
+      (item) => !item.archivedAt && item.competencyId === competencyParam,
+    )
+    if (competency && relation) {
+      selectedDirectionId.value = relation.directionId
+      timelineDirectionId.value = relation.directionId
+      timelineCompetencyId.value = competency.id
+      focusedCompetencyId.value = competency.id
+      openDirection(relation.directionId)
+    } else {
+      toastError('这个能力不存在或没有关联发展方向')
     }
   }
 
@@ -1003,7 +839,9 @@ onMounted(async () => {
     handledDeepLink = true
     const milestone = milestones.value.find((item) => item.id === milestoneParam)
     if (milestone) {
-      activeView.value = 'milestones'
+      selectedDirectionId.value = milestone.directionId
+      openDirection(milestone.directionId)
+      if (milestone.competencyId) focusedCompetencyId.value = milestone.competencyId
       openMilestoneDetail(milestone)
     } else {
       toastError('这个里程碑不存在或已经归档')
@@ -1014,9 +852,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('pointermove', onTimelinePointerMove)
-  window.removeEventListener('pointerup', onTimelinePointerUp)
-  if (suppressTimer) clearTimeout(suppressTimer)
+  window.removeEventListener('resize', syncTimelineColumns)
 })
 </script>
 
@@ -1027,7 +863,7 @@ onBeforeUnmount(() => {
         <p class="page-eyebrow">方向与路线 · 长期路线</p>
         <h2 class="page-title">发展路线图</h2>
         <p class="page-subtitle">
-          用能力地图、里程碑与时间线三种视图管理长期路线。Roadmap 负责战略与阶段成果，不等于日历。
+          从一个发展方向开始，逐层展开能力、里程碑和时间节点；底部总时间线负责回看整体节奏。
         </p>
       </div>
       <div class="header-actions">
@@ -1051,68 +887,27 @@ onBeforeUnmount(() => {
     <section class="roadmap-stats">
       <div class="roadmap-stat">
         <span class="stat-icon"><AppIcon name="layers" :size="16" /></span>
-        <div>
-          <span class="stat-number">{{ visibleCompetencies.length }}</span>
-          <span class="stat-caption">能力节点</span>
-        </div>
+        <div><span class="stat-number">{{ visibleCompetencies.length }}</span><span class="stat-caption">能力节点</span></div>
       </div>
       <div class="roadmap-stat">
         <span class="stat-icon icon-amber"><AppIcon name="flag" :size="16" /></span>
-        <div>
-          <span class="stat-number">{{ visibleMilestones.length }}</span>
-          <span class="stat-caption">里程碑</span>
-        </div>
+        <div><span class="stat-number">{{ visibleMilestones.length }}</span><span class="stat-caption">里程碑</span></div>
       </div>
       <div class="roadmap-stat">
         <span class="stat-icon icon-blue"><AppIcon name="play" :size="16" /></span>
-        <div>
-          <span class="stat-number">{{ inProgressMilestones }}</span>
-          <span class="stat-caption">进行中里程碑</span>
-        </div>
+        <div><span class="stat-number">{{ inProgressMilestones }}</span><span class="stat-caption">进行中</span></div>
       </div>
       <div class="roadmap-stat">
         <span class="stat-icon icon-violet"><AppIcon name="map" :size="16" /></span>
-        <div>
-          <span class="stat-number">{{ coveredDirectionCount }}</span>
-          <span class="stat-caption">覆盖发展方向</span>
-        </div>
+        <div><span class="stat-number">{{ coveredDirectionCount }}</span><span class="stat-caption">覆盖方向</span></div>
       </div>
     </section>
 
-    <section class="card view-toolbar">
-      <div class="view-tabs" role="tablist" aria-label="路线图视图">
-        <button
-          class="view-tab"
-          :class="{ active: activeView === 'map' }"
-          role="tab"
-          :aria-selected="activeView === 'map'"
-          @click="activeView = 'map'"
-        >
-          <AppIcon name="layers" :size="15" />
-          能力地图
-        </button>
-        <button
-          class="view-tab"
-          :class="{ active: activeView === 'milestones' }"
-          role="tab"
-          :aria-selected="activeView === 'milestones'"
-          @click="activeView = 'milestones'"
-        >
-          <AppIcon name="flag" :size="15" />
-          里程碑
-        </button>
-        <button
-          class="view-tab"
-          :class="{ active: activeView === 'timeline' }"
-          role="tab"
-          :aria-selected="activeView === 'timeline'"
-          @click="activeView = 'timeline'"
-        >
-          <AppIcon name="calendar" :size="15" />
-          时间线
-        </button>
+    <section class="card view-toolbar roadmap-toolbar">
+      <div class="toolbar-leading">
+        <span class="toolbar-label">路线筛选</span>
+        <span class="toolbar-help">默认只展开方向摘要</span>
       </div>
-
       <div class="toolbar-actions">
         <select v-model="selectedDirectionId" class="select direction-filter" aria-label="按方向筛选">
           <option value="all">全部方向</option>
@@ -1120,28 +915,18 @@ onBeforeUnmount(() => {
             {{ direction.name }}
           </option>
         </select>
-        <template v-if="activeView !== 'map'">
-          <select
-            v-model="milestoneStatusFilter"
-            class="select direction-filter"
-            aria-label="按里程碑状态筛选"
-          >
-            <option value="ALL">全部状态</option>
-            <option v-for="status in milestoneStatuses" :key="status" :value="status">
-              {{ milestoneStatusLabels[status] }}
-            </option>
-          </select>
-          <select
-            v-model="importanceFilter"
-            class="select direction-filter"
-            aria-label="按重要程度筛选"
-          >
-            <option value="ALL">全部重要度</option>
-            <option v-for="importance in importances" :key="importance" :value="importance">
-              {{ importanceLabels[importance] }}
-            </option>
-          </select>
-        </template>
+        <select v-model="milestoneStatusFilter" class="select direction-filter" aria-label="按里程碑状态筛选">
+          <option value="ALL">全部状态</option>
+          <option v-for="status in milestoneStatuses" :key="status" :value="status">
+            {{ milestoneStatusLabels[status] }}
+          </option>
+        </select>
+        <select v-model="importanceFilter" class="select direction-filter" aria-label="按重要程度筛选">
+          <option value="ALL">全部重要度</option>
+          <option v-for="importance in importances" :key="importance" :value="importance">
+            {{ importanceLabels[importance] }}
+          </option>
+        </select>
         <button
           class="btn btn-ghost"
           :class="{ 'is-on': includeArchived }"
@@ -1149,7 +934,7 @@ onBeforeUnmount(() => {
           @click="includeArchived = !includeArchived"
         >
           <AppIcon name="archive" :size="14" />
-          {{ includeArchived ? '隐藏已归档' : '显示已归档' }}
+          {{ includeArchived ? '隐藏归档' : '显示归档' }}
           <span v-if="archivedCount" class="archive-count">{{ archivedCount }}</span>
         </button>
       </div>
@@ -1158,406 +943,260 @@ onBeforeUnmount(() => {
     <div v-if="loading" class="skeleton roadmap-loading" />
 
     <template v-else>
-      <section v-if="activeView === 'map'" class="card card-pad map-card">
+      <section class="directions-section">
         <div class="section-head">
           <h3 class="section-title">
-            <AppIcon name="layers" :size="16" />
-            能力地图
-            <span class="count-pill">{{ visibleCompetencies.length }}</span>
+            <AppIcon name="map" :size="17" />
+            发展方向
+            <span class="count-pill">{{ filteredDirections.length }}</span>
           </h3>
-          <span class="section-note">一个能力可以被多个方向共享</span>
+          <span class="section-note">点击方向卡片展开能力树</span>
         </div>
-
-        <div class="level-legend" aria-hidden="true">
-          <span v-for="level in levels" :key="level" class="legend-item">
-            <span class="legend-code">{{ level }}</span>
-            <span class="legend-text">{{ competencyLevelLabels[level].split('·')[1]?.trim() }}</span>
-          </span>
-        </div>
-
-        <section
-          v-if="directionCompetencySummaries.length"
-          class="direction-progress-grid"
-          aria-label="方向能力完整度"
-        >
-          <article
-            v-for="summary in directionCompetencySummaries"
-            :key="summary.direction.id"
-            class="direction-progress-card"
-          >
-            <div class="direction-progress-head">
-              <span class="column-dot" :style="{ background: summary.direction.color }" />
-              <strong>{{ summary.direction.name }}</strong>
-              <span class="direction-progress-percent">{{ summary.percent }}%</span>
-            </div>
-            <div class="direction-progress-meta">
-              <span v-if="summary.total">
-                {{ summary.completed }} / {{ summary.total }} 项能力达标 ·
-                {{ summary.currentPoints }} / {{ summary.requiredPoints }} 等级分
-              </span>
-              <span v-else>尚未关联能力</span>
-            </div>
-            <div class="direction-progress-track" aria-hidden="true">
-              <span
-                class="direction-progress-fill"
-                :style="{ width: `${summary.percent}%`, background: summary.direction.color }"
-              />
-            </div>
-          </article>
-        </section>
 
         <EmptyState
           v-if="activeDirections.length === 0"
           title="还没有发展方向"
-          description="能力需要挂在发展方向上。先在“未来自我”中建立一个方向，再回来搭建能力地图。"
+          description="先在“未来自我”中建立一个方向，再用能力树和里程碑规划它。"
         >
-          <RouterLink to="/future-self" class="btn btn-sm btn-secondary">
-            去创建发展方向
-          </RouterLink>
+          <RouterLink to="/future-self" class="btn btn-sm btn-secondary">去创建发展方向</RouterLink>
         </EmptyState>
 
-        <EmptyState
-          v-else-if="competencyTree.length === 0"
-          title="能力地图还是空的"
-          description="从一组可以被验证的能力开始，例如“C++ 工程能力”或“科研阅读与写作”。"
-        >
-          <button class="btn btn-sm btn-secondary" @click="openCompetencyCreate()">
-            添加第一个能力
-          </button>
-        </EmptyState>
+        <div v-else class="direction-card-list">
+          <article
+            v-for="summary in directionSummaries"
+            :key="summary.direction.id"
+            class="card direction-card"
+            :data-direction-id="summary.direction.id"
+          >
+            <header class="direction-card-head">
+              <button
+                class="direction-summary"
+                :aria-expanded="Boolean(expandedDirectionIds[summary.direction.id])"
+                @click="toggleDirection(summary.direction.id)"
+              >
+                <span class="direction-swatch" :style="{ background: summary.direction.color }" />
+                <span class="direction-copy">
+                  <span class="direction-kicker">
+                    优先级 {{ summary.direction.priority }} · 目标 {{ formatShortDate(summary.direction.targetDate) }}
+                  </span>
+                  <strong>{{ summary.direction.name }}</strong>
+                  <span class="direction-description">
+                    {{ summary.direction.description || '尚未补充方向说明' }}
+                  </span>
+                </span>
 
-        <ul v-else class="competency-tree">
-          <CompetencyTreeNode
-            v-for="node in competencyTree"
-            :key="node.competency.id"
-            :node="node"
-            :direction-map="directionMap"
-            :assignments-by-competency="assignmentsByCompetency"
-            :evidence-counts="evidenceCounts"
-            @add-child="openCompetencyCreate"
-            @edit="openCompetencyEdit"
-            @open-detail="openCompetencyDetail"
-            @toggle-archive="
-              (competency) => askToggle('competency', competency.id, competency.name, competency.archivedAt)
-            "
-          />
-        </ul>
+                <span class="direction-metrics">
+                  <span><b>{{ summary.competencyCount }}</b> 项能力</span>
+                  <span><b>{{ summary.milestoneCount }}</b> 个里程碑</span>
+                  <span v-if="summary.nextMilestone" class="next-node">
+                    下一节点 {{ formatShortDate(summary.nextMilestone.dueDate ?? summary.nextMilestone.startDate) }}
+                  </span>
+                  <span v-else class="next-node muted">还没有时间节点</span>
+                </span>
 
-        <div v-if="activeDirections.length > 0" class="map-foot">
-          <button class="btn btn-sm btn-ghost" @click="openCompetencyCreate()">
-            <AppIcon name="plus" :size="14" />
-            添加根能力
-          </button>
+                <span class="direction-progress-box">
+                  <span class="direction-progress-label">
+                    能力完整度 <b>{{ summary.percent }}%</b>
+                  </span>
+                  <span class="direction-progress-track" aria-hidden="true">
+                    <span
+                      class="direction-progress-fill"
+                      :style="{ width: `${summary.percent}%`, background: summary.direction.color }"
+                    />
+                  </span>
+                </span>
+
+                <span class="direction-expand">
+                  <AppIcon
+                    name="arrow-right"
+                    :size="15"
+                    :class="{ rotated: expandedDirectionIds[summary.direction.id] }"
+                  />
+                  {{ expandedDirectionIds[summary.direction.id] ? '收起' : '展开能力树' }}
+                </span>
+              </button>
+
+              <div class="direction-actions">
+                <button
+                  class="icon-btn"
+                  title="在此方向添加根能力"
+                  aria-label="在此方向添加根能力"
+                  @click="openCompetencyCreate(undefined, summary.direction.id)"
+                >
+                  <AppIcon name="plus" :size="15" />
+                </button>
+                <button
+                  class="icon-btn"
+                  title="在此方向添加里程碑"
+                  aria-label="在此方向添加里程碑"
+                  @click="openMilestoneCreate(summary.direction.id)"
+                >
+                  <AppIcon name="flag" :size="15" />
+                </button>
+              </div>
+            </header>
+
+            <div v-if="expandedDirectionIds[summary.direction.id]" class="direction-body">
+              <div class="ability-tree-head">
+                <div>
+                  <strong>能力树</strong>
+                  <span>能力 → 子能力 → 里程碑与时间节点</span>
+                </div>
+                <span class="ability-tree-count">
+                  {{ directionNodeCount(summary.direction.id) }} 个能力节点
+                </span>
+              </div>
+
+              <EmptyState
+                v-if="directionCompetencyTree(summary.direction.id).length === 0"
+                title="这个方向还没有能力"
+                description="先添加一个根能力，再继续拆出子能力，并为能力设置里程碑。"
+              >
+                <button class="btn btn-sm btn-secondary" @click="openCompetencyCreate(undefined, summary.direction.id)">
+                  添加根能力
+                </button>
+              </EmptyState>
+
+              <ul v-else class="direction-ability-tree">
+                <RoadmapAbilityNode
+                  v-for="node in directionCompetencyTree(summary.direction.id)"
+                  :key="node.competency.id"
+                  :node="node"
+                  :direction-id="summary.direction.id"
+                  :direction-color="summary.direction.color"
+                  :required-levels="requiredLevelsForDirection(summary.direction.id)"
+                  :milestones-by-competency="milestonesByCompetency"
+                  :focused-competency-id="focusedCompetencyId"
+                  @open-competency="openCompetencyDetail"
+                  @add-child="(competency) => openCompetencyCreate(competency, summary.direction.id)"
+                  @edit-competency="openCompetencyEdit"
+                  @toggle-archive="
+                    (competency) => askToggle('competency', competency.id, competency.name, competency.archivedAt)
+                  "
+                  @add-milestone="(competency) => openMilestoneCreate(summary.direction.id, competency.id)"
+                  @open-milestone="openMilestoneDetail"
+                />
+              </ul>
+
+              <section v-if="unlinkedMilestones(summary.direction.id).length" class="unlinked-milestones">
+                <div class="unlinked-head">
+                  <span><AppIcon name="flag" :size="14" /> 方向级里程碑</span>
+                  <span>尚未关联到具体能力</span>
+                </div>
+                <button
+                  v-for="milestone in unlinkedMilestones(summary.direction.id)"
+                  :key="milestone.id"
+                  class="unlinked-milestone"
+                  @click="openMilestoneDetail(milestone)"
+                >
+                  <span class="unlinked-date">{{ formatShortDate(milestone.dueDate ?? milestone.startDate) }}</span>
+                  <span class="unlinked-name">{{ milestone.name }}</span>
+                  <span class="badge">{{ milestoneStatusLabels[milestone.status] }}</span>
+                  <AppIcon name="arrow-right" :size="13" />
+                </button>
+              </section>
+
+              <div class="direction-body-actions">
+                <button class="btn btn-sm btn-ghost" @click="openCompetencyCreate(undefined, summary.direction.id)">
+                  <AppIcon name="plus" :size="14" /> 添加根能力
+                </button>
+                <button class="btn btn-sm btn-ghost" @click="openMilestoneCreate(summary.direction.id)">
+                  <AppIcon name="flag" :size="14" /> 添加方向级里程碑
+                </button>
+              </div>
+            </div>
+          </article>
         </div>
       </section>
 
-      <div v-else-if="activeView === 'milestones'" class="milestone-board">
+      <section class="card s-timeline-card" aria-labelledby="s-timeline-title">
+        <div class="s-timeline-head">
+          <div>
+            <p class="timeline-eyebrow">全局回看</p>
+            <h3 id="s-timeline-title" class="timeline-title">
+              <AppIcon name="calendar" :size="17" />
+              S 型总时间线
+            </h3>
+            <p class="timeline-subtitle">
+              当前范围：{{ timelineScopeLabel }} · {{ timelineItems.length }} 个时间节点
+            </p>
+          </div>
+          <div class="s-timeline-controls">
+            <select v-model="timelineDirectionId" class="select direction-filter" aria-label="时间线方向范围">
+              <option value="all">全部方向</option>
+              <option v-for="direction in activeDirections" :key="direction.id" :value="direction.id">
+                {{ direction.name }}
+              </option>
+            </select>
+            <select v-model="timelineCompetencyId" class="select direction-filter" aria-label="时间线能力范围">
+              <option value="all">全部能力</option>
+              <option v-for="competency in timelineCompetencyOptions" :key="competency.id" :value="competency.id">
+                {{ competency.name }}
+              </option>
+            </select>
+            <select v-model="timelineStatusFilter" class="select direction-filter" aria-label="时间线状态范围">
+              <option value="ALL">全部状态</option>
+              <option v-for="status in milestoneStatuses" :key="status" :value="status">
+                {{ milestoneStatusLabels[status] }}
+              </option>
+            </select>
+          </div>
+        </div>
+
         <EmptyState
-          v-if="activeDirections.length === 0"
-          title="还没有发展方向"
-          description="里程碑必须属于一个发展方向，先创建一个方向再回来。"
+          v-if="timelineItems.length === 0"
+          title="当前范围还没有时间节点"
+          description="为里程碑补充开始或截止日期，或者切换筛选范围。"
         >
-          <RouterLink to="/future-self" class="btn btn-sm btn-secondary">
-            去创建发展方向
-          </RouterLink>
+          <button class="btn btn-sm btn-secondary" @click="openMilestoneCreate()">添加里程碑</button>
         </EmptyState>
 
-        <section
-          v-for="direction in filteredDirections"
-          v-else
-          :key="direction.id"
-          class="direction-column card"
-        >
-          <header class="column-head">
-            <span class="column-dot" :style="{ background: direction.color }" />
-            <div class="column-title">
-              <span class="column-name">{{ direction.name }}</span>
-              <span class="column-meta">
-                {{ boardMilestones(direction.id).length }} 个里程碑 ·
-                {{ formatDate(direction.targetDate) }}
-              </span>
-            </div>
-            <button
-              class="icon-btn"
-              title="在此方向添加里程碑"
-              aria-label="在此方向添加里程碑"
-              @click="openMilestoneCreate(direction.id)"
-            >
-              <AppIcon name="plus" :size="16" />
-            </button>
-          </header>
-
-          <section
-            v-if="stagesOfDirection(direction.id).length"
-            class="stage-list"
-            :aria-label="`${direction.name}的阶段轨道`"
+        <div v-else class="s-timeline-board" data-timeline-mode="snake">
+          <div
+            v-for="(row, rowIndex) in sTimelineRows"
+            :key="row.index"
+            class="s-timeline-row"
+            :class="{ reverse: row.index % 2 === 1 }"
+            :data-row-index="rowIndex"
           >
-            <div class="stage-list-head">
-              <span>
-                <AppIcon name="flag" :size="12" />
-                阶段轨道
+            <button
+              v-for="item in row.items"
+              :key="item.milestone.id"
+              class="s-timeline-node"
+              :class="`status-${item.milestone.status.toLowerCase()}`"
+              :style="{ '--node-color': item.direction?.color ?? '#3563e9' }"
+              :data-milestone-id="item.milestone.id"
+              @click="openMilestoneDetail(item.milestone)"
+            >
+              <span class="s-node-order">{{ item.order }}</span>
+              <span class="s-node-date">{{ formatShortDate(item.date) }}</span>
+              <strong>{{ item.milestone.name }}</strong>
+              <span class="s-node-context">
+                <span>{{ item.direction?.name ?? '未知方向' }}</span>
+                <span>{{ item.competency?.name ?? '方向级里程碑' }}</span>
               </span>
-              <span>由里程碑日期推导</span>
-            </div>
-
-            <article
-              v-for="stage in stagesOfDirection(direction.id)"
-              :key="stage.id"
-              class="stage-card"
-            >
-              <div class="stage-card-main">
-                <span class="stage-index">P{{ stage.index }}</span>
-                <button class="stage-name-btn" @click="openMilestoneDetail(stage.endMilestone)">
-                  {{ stage.label }}
-                </button>
-                <span class="stage-range">
-                  {{ formatShortDate(stage.startDate) }} → {{ formatShortDate(stage.endDate) }}
-                </span>
-              </div>
-              <div class="stage-actions">
-                <template v-if="stage.startMilestone">
-                  <span class="stage-boundary-label">起点</span>
-                  <button
-                    class="date-shift-btn"
-                    :aria-label="`${stage.startMilestone.name}提前一天`"
-                    @click="shiftStageBoundary(stage, 'start', -1)"
-                  >
-                    提前 1 天
-                  </button>
-                  <button
-                    class="date-shift-btn"
-                    :aria-label="`${stage.startMilestone.name}延后一天`"
-                    @click="shiftStageBoundary(stage, 'start', 1)"
-                  >
-                    延后 1 天
-                  </button>
-                </template>
-                <span class="stage-boundary-label">终点</span>
-                <button
-                  class="date-shift-btn"
-                  :aria-label="`${stage.endMilestone.name}提前一天`"
-                  @click="shiftStageBoundary(stage, 'end', -1)"
-                >
-                  提前 1 天
-                </button>
-                <button
-                  class="date-shift-btn"
-                  :aria-label="`${stage.endMilestone.name}延后一天`"
-                  @click="shiftStageBoundary(stage, 'end', 1)"
-                >
-                  延后 1 天
-                </button>
-                <button class="stage-open-btn" @click="openMilestoneDetail(stage.endMilestone)">
-                  查看里程碑
-                  <AppIcon name="arrow-right" :size="11" />
-                </button>
-              </div>
-            </article>
-
-            <button class="btn btn-sm btn-secondary stage-add-btn" @click="openMilestoneCreate(direction.id)">
-              <AppIcon name="plus" :size="13" />
-              新增阶段里程碑
-            </button>
-          </section>
-
-          <div v-if="boardMilestones(direction.id).length === 0" class="column-empty">
-            <span>{{ hasMilestoneFilters ? '当前筛选下没有里程碑。' : '这个方向还没有阶段成果。' }}</span>
-            <button class="link-btn" @click="openMilestoneCreate(direction.id)">
-              添加一个里程碑
-              <AppIcon name="arrow-right" :size="12" />
+              <span class="s-node-foot">
+                <span class="badge">{{ milestoneStatusLabels[item.milestone.status] }}</span>
+                <span>{{ relativeDay(item.milestone.dueDate) }}</span>
+              </span>
             </button>
           </div>
 
-          <ul v-else class="milestone-list">
-            <li
-              v-for="milestone in boardMilestones(direction.id)"
-              :key="milestone.id"
-              class="milestone-card"
-              :class="{ archived: milestone.archivedAt }"
+          <template v-for="(row, rowIndex) in sTimelineRows.slice(0, -1)" :key="`connector-${row.index}`">
+            <div
+              class="s-timeline-connector"
+              :class="rowIndex % 2 === 0 ? 'at-right' : 'at-left'"
+              aria-hidden="true"
             >
-              <div class="milestone-top">
-                <button class="milestone-name milestone-name-btn" @click="openMilestoneDetail(milestone)">
-                  {{ milestone.name }}
-                </button>
-                <span class="badge">{{ milestoneStatusLabels[milestone.status] }}</span>
-              </div>
-              <div class="milestone-meta">
-                <span class="badge badge-accent">{{ importanceLabels[milestone.importance] }}</span>
-                <span>{{ formatShortDate(milestone.startDate) }} → {{ formatShortDate(milestone.dueDate) }}</span>
-                <span class="milestone-when">{{ relativeDay(milestone.dueDate) }}</span>
-              </div>
-              <p v-if="milestone.successCriteria" class="milestone-criteria">
-                <AppIcon name="check" :size="12" />
-                {{ milestone.successCriteria }}
-              </p>
-              <div class="milestone-foot">
-                <span v-if="milestone.archivedAt" class="badge badge-amber">已归档</span>
-                <div
-                  v-else-if="milestone.startDate || milestone.dueDate"
-                  class="milestone-date-actions"
-                >
-                  <button
-                    class="date-shift-btn"
-                    :aria-label="`${milestone.name}提前一天`"
-                    @click="shiftMilestoneDate(milestone, -1)"
-                  >
-                    提前 1 天
-                  </button>
-                  <button
-                    class="date-shift-btn"
-                    :aria-label="`${milestone.name}延后一天`"
-                    @click="shiftMilestoneDate(milestone, 1)"
-                  >
-                    延后 1 天
-                  </button>
-                </div>
-                <div class="row-actions">
-                  <button
-                    v-if="!milestone.archivedAt"
-                    class="icon-btn"
-                    title="编辑里程碑"
-                    aria-label="编辑里程碑"
-                    @click="openMilestoneEdit(milestone)"
-                  >
-                    <AppIcon name="sliders" :size="14" />
-                  </button>
-                  <button
-                    class="icon-btn"
-                    :title="milestone.archivedAt ? '恢复里程碑' : '归档里程碑'"
-                    :aria-label="milestone.archivedAt ? '恢复里程碑' : '归档里程碑'"
-                    @click="askToggle('milestone', milestone.id, milestone.name, milestone.archivedAt)"
-                  >
-                    <AppIcon :name="milestone.archivedAt ? 'archive' : 'trash'" :size="14" />
-                  </button>
-                </div>
-              </div>
-            </li>
-          </ul>
-        </section>
-      </div>
-
-      <section v-else class="card card-pad timeline-card">
-        <div class="section-head">
-          <h3 class="section-title">
-            <AppIcon name="calendar" :size="16" />
-            多轨道时间线
-          </h3>
-          <div class="timeline-controls">
-            <div class="scale-switch">
-              <button
-                class="scale-btn"
-                :class="{ active: timelineScale === 'year' }"
-                @click="changeTimelineScale('year')"
-              >
-                年
-              </button>
-              <button
-                class="scale-btn"
-                :class="{ active: timelineScale === 'quarter' }"
-                @click="changeTimelineScale('quarter')"
-              >
-                季度
-              </button>
-              <button
-                class="scale-btn"
-                :class="{ active: timelineScale === 'month' }"
-                @click="changeTimelineScale('month')"
-              >
-                月
-              </button>
-              <button
-                class="scale-btn"
-                :class="{ active: timelineScale === 'week' }"
-                @click="changeTimelineScale('week')"
-              >
-                周
-              </button>
+              <span />
             </div>
-            <button class="timeline-today-btn" @click="scrollToToday">
-              <AppIcon name="target" :size="12" />
-              回到今天
-            </button>
-            <span class="section-note">
-              {{ formatDate(timelineRange.start.toISOString()) }} —
-              {{ formatDate(timelineRange.end.toISOString()) }}
-            </span>
-          </div>
+          </template>
         </div>
 
-        <EmptyState
-          v-if="!hasTimelineItems"
-          title="时间线上还没有里程碑"
-          description="为里程碑补充开始或截止日期后，它们会按发展方向显示在时间线上。"
-        >
-          <button class="btn btn-sm btn-secondary" @click="openMilestoneCreate()">
-            添加里程碑
-          </button>
-        </EmptyState>
-
-        <div v-else ref="timelineScroll" class="timeline-scroll">
-          <div class="timeline-table" :style="{ minWidth: `${180 + timelineWidth}px` }">
-            <div class="timeline-row timeline-head-row">
-              <div class="timeline-label">发展方向</div>
-              <div class="timeline-track ticks-track" :style="{ minWidth: `${timelineWidth}px` }">
-                <span
-                  v-for="tick in timelineTicks"
-                  :key="tick.key"
-                  class="tick"
-                  :class="{ major: tick.major }"
-                  :style="{ left: `${tick.percent}%` }"
-                >
-                  {{ tick.label }}
-                </span>
-              </div>
-            </div>
-
-            <div v-for="row in timelineRows" :key="row.direction.id" class="timeline-row">
-              <div class="timeline-label">
-                <span class="lane-dot" :style="{ background: row.direction.color }" />
-                <span class="lane-name">{{ row.direction.name }}</span>
-              </div>
-              <div class="timeline-track lane-track">
-                <span class="lane-line" />
-                <span
-                  v-if="todayPercent !== null"
-                  class="today-line"
-                  :style="{ left: `${todayPercent}%` }"
-                  title="今天"
-                />
-                <button
-                  v-for="phase in row.phases"
-                  :key="phase.stage.id"
-                  class="timeline-phase"
-                  :style="timelinePhaseStyle(phase, row.direction)"
-                  :title="`阶段 P${phase.stage.index}：${phase.stage.label}`"
-                  @click.stop="openMilestoneDetail(phase.stage.endMilestone)"
-                >
-                  <span>P{{ phase.stage.index }}</span>
-                  <span class="timeline-phase-name">{{ phase.stage.endMilestone.name }}</span>
-                </button>
-                <button
-                  v-for="bar in row.bars"
-                  :key="bar.milestone.id"
-                  class="timeline-bar"
-                  :class="{ dragging: draggingMilestoneId === bar.milestone.id }"
-                  :style="timelineBarStyle(bar)"
-                  :title="`${bar.milestone.name} · ${formatDate(bar.milestone.startDate)} → ${formatDate(bar.milestone.dueDate)}\n拖动调整日期，点击查看详情`"
-                  @pointerdown.stop="onTimelinePointerDown($event, bar)"
-                  @click="handleTimelineBarClick(bar)"
-                >
-                  <span class="bar-text">{{ bar.milestone.name }}</span>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="timeline-foot">
-          <span class="timeline-legend"><span class="legend-today" /> 今天</span>
-          <span class="timeline-legend"><span class="legend-phase" /> 推导阶段区间</span>
-          <span class="timeline-legend"><span class="legend-bar" /> 里程碑时间范围</span>
-          <span class="timeline-legend"><AppIcon name="sliders" :size="11" /> 拖动里程碑或用按钮调整日期</span>
-          <span class="section-note">横向滚动查看更长周期</span>
+        <div class="s-timeline-foot">
+          <span><span class="legend-node" /> 点击节点查看里程碑详情</span>
+          <span v-if="undatedMilestoneCount">{{ undatedMilestoneCount }} 个里程碑尚未排期，未进入时间线</span>
+          <span>按计划完成日排序；同一天按名称排序</span>
         </div>
       </section>
     </template>
@@ -1566,7 +1205,7 @@ onBeforeUnmount(() => {
       :open="detailCompetency !== null"
       :title="detailCompetency?.name ?? '能力详情'"
       :subtitle="detailCompetency ? competencyCategoryLabels[detailCompetency.category] : ''"
-      :width="460"
+      :width="480"
       @close="closeCompetencyDetail"
     >
       <div v-if="detailCompetency" class="competency-detail">
@@ -1586,14 +1225,8 @@ onBeforeUnmount(() => {
             <strong>{{ detailCompetency.currentLevel }} → {{ detailCompetency.targetLevel }}</strong>
           </div>
           <div class="level-track detail-level-track">
-            <span
-              class="level-fill"
-              :style="{ width: `${levelPercent(detailCompetency.currentLevel)}%` }"
-            />
-            <span
-              class="level-target"
-              :style="{ left: `${levelPercent(detailCompetency.targetLevel)}%` }"
-            />
+            <span class="level-fill" :style="{ width: `${levelPercent(detailCompetency.currentLevel)}%` }" />
+            <span class="level-target" :style="{ left: `${levelPercent(detailCompetency.targetLevel)}%` }" />
           </div>
           <div class="detail-level-caption">
             <span>{{ competencyLevelLabels[detailCompetency.currentLevel] }}</span>
@@ -1624,11 +1257,8 @@ onBeforeUnmount(() => {
 
         <div class="growth-block">
           <div class="section-head">
-            <h4 class="growth-title">
-              <AppIcon name="spark" :size="14" />
-              成长曲线
-            </h4>
-            <span class="section-note">来自成果评价，不按学习时长拟合</span>
+            <h4 class="growth-title"><AppIcon name="spark" :size="14" /> 成长曲线</h4>
+            <span class="section-note">来自成果评价</span>
           </div>
 
           <div v-if="detailGrowth.length < 2" class="growth-empty">
@@ -1638,14 +1268,7 @@ onBeforeUnmount(() => {
             <svg class="growth-svg" viewBox="0 0 300 90" role="img" aria-label="能力等级变化">
               <line v-for="y in [22, 48, 74]" :key="y" x1="18" :y1="y" x2="282" :y2="y" class="growth-grid-line" />
               <polyline :points="growthPoints" class="growth-line" />
-              <circle
-                v-for="dot in growthDots"
-                :key="dot.id"
-                :cx="dot.x"
-                :cy="dot.y"
-                r="3.5"
-                class="growth-dot"
-              />
+              <circle v-for="dot in growthDots" :key="dot.id" :cx="dot.x" :cy="dot.y" r="3.5" class="growth-dot" />
             </svg>
             <div class="growth-axis">
               <span>{{ formatShortDate(growthDots[0]?.date ?? null) }}</span>
@@ -1658,9 +1281,7 @@ onBeforeUnmount(() => {
               <span class="growth-entry-level">{{ item.level }}</span>
               <div>
                 <span class="growth-entry-title">{{ item.evidenceTitle }}</span>
-                <span class="growth-entry-meta">
-                  {{ formatShortDate(item.date) }} · {{ item.note || '未填写评价说明' }}
-                </span>
+                <span class="growth-entry-meta">{{ formatShortDate(item.date) }} · {{ item.note || '未填写评价说明' }}</span>
               </div>
             </div>
           </div>
@@ -1685,7 +1306,7 @@ onBeforeUnmount(() => {
       :open="detailMilestone !== null"
       :title="detailMilestone?.name ?? '里程碑详情'"
       :subtitle="detailMilestoneDirection ? detailMilestoneDirection.name : ''"
-      :width="450"
+      :width="500"
       @close="closeMilestoneDetail"
     >
       <div v-if="detailMilestone" class="milestone-detail">
@@ -1700,22 +1321,10 @@ onBeforeUnmount(() => {
         </p>
 
         <div class="milestone-detail-grid">
-          <div>
-            <span>计划开始</span>
-            <strong>{{ formatDate(detailMilestone.startDate) }}</strong>
-          </div>
-          <div>
-            <span>计划完成</span>
-            <strong>{{ formatDate(detailMilestone.dueDate) }}</strong>
-          </div>
-          <div>
-            <span>距离完成</span>
-            <strong>{{ relativeDay(detailMilestone.dueDate) }}</strong>
-          </div>
-          <div>
-            <span>所属方向</span>
-            <strong>{{ detailMilestoneDirection?.name ?? '未知方向' }}</strong>
-          </div>
+          <div><span>计划开始</span><strong>{{ formatDate(detailMilestone.startDate) }}</strong></div>
+          <div><span>计划完成</span><strong>{{ formatDate(detailMilestone.dueDate) }}</strong></div>
+          <div><span>距离完成</span><strong>{{ relativeDay(detailMilestone.dueDate) }}</strong></div>
+          <div><span>所属方向</span><strong>{{ detailMilestoneDirection?.name ?? '未知方向' }}</strong></div>
         </div>
 
         <div
@@ -1724,14 +1333,10 @@ onBeforeUnmount(() => {
         >
           <span class="detail-block-label">快速调整日期</span>
           <div class="date-shift-group">
-            <button class="date-shift-btn" @click="shiftMilestoneDate(detailMilestone, -1)">
-              提前 1 天
-            </button>
-            <button class="date-shift-btn" @click="shiftMilestoneDate(detailMilestone, 1)">
-              延后 1 天
-            </button>
+            <button class="date-shift-btn" @click="shiftMilestoneDate(detailMilestone, -1)">提前 1 天</button>
+            <button class="date-shift-btn" @click="shiftMilestoneDate(detailMilestone, 1)">延后 1 天</button>
           </div>
-          <span class="date-shift-hint">与时间线拖拽等效，便于键盘和触屏操作。</span>
+          <span class="date-shift-hint">调整后会同步更新能力树和 S 型总时间线。</span>
         </div>
 
         <div v-if="detailDirectionSummary" class="detail-direction-progress">
@@ -1745,19 +1350,12 @@ onBeforeUnmount(() => {
           <div class="direction-progress-track" aria-hidden="true">
             <span
               class="direction-progress-fill"
-              :style="{
-                width: `${detailDirectionSummary.percent}%`,
-                background: detailDirectionSummary.direction.color,
-              }"
+              :style="{ width: `${detailDirectionSummary.percent}%`, background: detailDirectionSummary.direction.color }"
             />
           </div>
           <div class="direction-progress-meta">
-            <span>
-              {{ detailDirectionSummary.completed }} / {{ detailDirectionSummary.total }} 项能力达标
-            </span>
-            <span>
-              {{ detailDirectionSummary.currentPoints }} / {{ detailDirectionSummary.requiredPoints }} 等级分
-            </span>
+            <span>{{ detailDirectionSummary.completedCompetencies }} / {{ detailDirectionSummary.competencyCount }} 项能力达标</span>
+            <span>{{ detailDirectionSummary.completedCount }} / {{ detailDirectionSummary.milestoneCount }} 个里程碑完成</span>
           </div>
         </div>
 
@@ -1767,23 +1365,16 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="detail-block">
-          <span class="detail-block-label">
-            相关能力（{{ detailMilestoneCompetencies.length }}）
-          </span>
-          <div v-if="detailMilestoneCompetencies.length === 0" class="detail-empty">
-            这个方向还没有关联能力，可先到能力地图补充。
-          </div>
-          <div v-else class="milestone-competency-list">
-            <div
-              v-for="item in detailMilestoneCompetencies"
-              :key="item.competency.id"
-              class="milestone-competency"
-            >
-              <span class="milestone-competency-name">{{ item.competency.name }}</span>
-              <span class="level-pill">
-                当前 {{ item.competency.currentLevel }} / 要求 {{ item.assignment.requiredLevel }}
-              </span>
+          <span class="detail-block-label">关联能力</span>
+          <div v-if="detailMilestoneCompetency" class="linked-competency-card">
+            <span class="tag-dot" :style="{ background: detailMilestoneDirection?.color ?? '#3563e9' }" />
+            <div>
+              <strong>{{ detailMilestoneCompetency.name }}</strong>
+              <span>{{ competencyCategoryLabels[detailMilestoneCompetency.category] }} · {{ detailMilestoneCompetency.currentLevel }} → {{ detailMilestoneCompetency.targetLevel }}</span>
             </div>
+          </div>
+          <div v-else class="detail-empty">
+            这是方向级里程碑，尚未关联具体能力。编辑里程碑即可补上能力归属。
           </div>
         </div>
 
@@ -1825,39 +1416,25 @@ onBeforeUnmount(() => {
       <form class="form" @submit.prevent="submitCompetency">
         <div class="field">
           <label class="field-label" for="competency-name">能力名称</label>
-          <input
-            id="competency-name"
-            v-model="competencyForm.name"
-            class="input"
-            placeholder="例如：SAT 与局部搜索 / C++ 工程能力"
-          />
+          <input id="competency-name" v-model="competencyForm.name" class="input" placeholder="例如：SAT 与局部搜索 / C++ 工程能力" />
         </div>
 
         <div class="field">
           <label class="field-label" for="competency-desc">能力说明</label>
-          <textarea
-            id="competency-desc"
-            v-model="competencyForm.description"
-            class="textarea"
-            placeholder="这个能力具体指什么？能做什么？"
-          />
+          <textarea id="competency-desc" v-model="competencyForm.description" class="textarea" placeholder="这个能力具体指什么？能做什么？" />
         </div>
 
         <div class="form-grid">
           <div class="field">
             <label class="field-label" for="competency-category">能力类别</label>
             <select id="competency-category" v-model="competencyForm.category" class="select">
-              <option v-for="category in categories" :key="category" :value="category">
-                {{ competencyCategoryLabels[category] }}
-              </option>
+              <option v-for="category in categories" :key="category" :value="category">{{ competencyCategoryLabels[category] }}</option>
             </select>
           </div>
           <div class="field">
             <label class="field-label" for="competency-status">状态</label>
             <select id="competency-status" v-model="competencyForm.status" class="select">
-              <option v-for="status in competencyStatuses" :key="status" :value="status">
-                {{ competencyStatusLabels[status] }}
-              </option>
+              <option v-for="status in competencyStatuses" :key="status" :value="status">{{ competencyStatusLabels[status] }}</option>
             </select>
           </div>
         </div>
@@ -1866,51 +1443,35 @@ onBeforeUnmount(() => {
           <label class="field-label" for="competency-parent">父能力</label>
           <select id="competency-parent" v-model="competencyForm.parentId" class="select">
             <option value="">无（作为根能力）</option>
-            <option
-              v-for="option in parentOptions"
-              :key="option.id"
-              :value="option.id"
-            >
-              {{ option.name }}
-            </option>
+            <option v-for="option in parentOptions" :key="option.id" :value="option.id">{{ option.name }}</option>
           </select>
+          <span class="field-hint">从方向卡片进入时会自动关联当前方向；根能力下可继续添加子能力。</span>
         </div>
 
-        <div class="form-grid form-grid-3">
+        <div class="form-grid">
           <div class="field">
             <label class="field-label" for="competency-current">当前等级</label>
             <select id="competency-current" v-model="competencyForm.currentLevel" class="select">
-              <option v-for="level in levels" :key="level" :value="level">
-                {{ competencyLevelLabels[level] }}
-              </option>
+              <option v-for="level in levels" :key="level" :value="level">{{ competencyLevelLabels[level] }}</option>
             </select>
           </div>
           <div class="field">
             <label class="field-label" for="competency-target">目标等级</label>
             <select id="competency-target" v-model="competencyForm.targetLevel" class="select">
-              <option v-for="level in levels" :key="level" :value="level">
-                {{ competencyLevelLabels[level] }}
-              </option>
+              <option v-for="level in levels" :key="level" :value="level">{{ competencyLevelLabels[level] }}</option>
             </select>
           </div>
         </div>
 
         <div class="field">
           <label class="field-label" for="competency-criteria">评价标准</label>
-          <textarea
-            id="competency-criteria"
-            v-model="competencyForm.assessmentCriteria"
-            class="textarea"
-            placeholder="达到目标等级时，应该能做出什么？需要哪些成果证据？"
-          />
+          <textarea id="competency-criteria" v-model="competencyForm.assessmentCriteria" class="textarea" placeholder="达到目标等级时，应该能做出什么？需要哪些成果证据？" />
           <span class="field-hint">等级不能仅按学习时长或任务完成率自动提升，要有标准和证据。</span>
         </div>
 
         <div class="field">
           <span class="field-label">关联发展方向</span>
-          <div v-if="activeDirections.length === 0" class="relation-empty">
-            还没有发展方向，请先在“未来自我”中创建。
-          </div>
+          <div v-if="activeDirections.length === 0" class="relation-empty">还没有发展方向，请先在“未来自我”中创建。</div>
           <div v-else class="relation-list">
             <div
               v-for="direction in activeDirections"
@@ -1922,42 +1483,25 @@ onBeforeUnmount(() => {
                 <input
                   type="checkbox"
                   :checked="competencyForm.selectedDirectionIds.includes(direction.id)"
-                  @change="toggleDirection(direction.id, $event)"
+                  @change="toggleDirectionAssignment(direction.id, $event)"
                 />
                 <span class="relation-dot" :style="{ background: direction.color }" />
                 <span class="relation-name">{{ direction.name }}</span>
               </label>
               <template v-if="competencyForm.selectedDirectionIds.includes(direction.id)">
-                <select
-                  v-model="competencyForm.requiredLevels[direction.id]"
-                  class="select relation-select"
-                  aria-label="要求等级"
-                >
-                  <option v-for="level in levels" :key="level" :value="level">
-                    {{ level }}
-                  </option>
+                <select v-model="competencyForm.requiredLevels[direction.id]" class="select relation-select" aria-label="要求等级">
+                  <option v-for="level in levels" :key="level" :value="level">{{ level }}</option>
                 </select>
-                <select
-                  v-model="competencyForm.priorities[direction.id]"
-                  class="select relation-select"
-                  aria-label="关联优先级"
-                >
-                  <option
-                    v-for="priority in relationPriorities"
-                    :key="priority"
-                    :value="priority"
-                  >
-                    {{ priorityLabels[priority] }}
-                  </option>
+                <select v-model="competencyForm.priorities[direction.id]" class="select relation-select" aria-label="关联优先级">
+                  <option v-for="priority in relationPriorities" :key="priority" :value="priority">{{ priorityLabels[priority] }}</option>
                 </select>
               </template>
             </div>
           </div>
-          <span class="field-hint">同一能力被多个方向引用时只维护一份能力记录。</span>
+          <span class="field-hint">同一能力被多个方向引用时只维护一份能力记录和一套子能力。</span>
         </div>
 
         <p v-if="formError" class="form-error">{{ formError }}</p>
-
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" @click="resetModal">取消</button>
           <button type="submit" class="btn btn-primary" :disabled="saving">
@@ -1977,22 +1521,12 @@ onBeforeUnmount(() => {
       <form class="form" @submit.prevent="submitMilestone">
         <div class="field">
           <label class="field-label" for="milestone-name">里程碑名称</label>
-          <input
-            id="milestone-name"
-            v-model="milestoneForm.name"
-            class="input"
-            placeholder="例如：独立完成 SAT 算法复现实验"
-          />
+          <input id="milestone-name" v-model="milestoneForm.name" class="input" placeholder="例如：独立完成 SAT 算法复现实验" />
         </div>
 
         <div class="field">
           <label class="field-label" for="milestone-desc">说明</label>
-          <textarea
-            id="milestone-desc"
-            v-model="milestoneForm.description"
-            class="textarea"
-            placeholder="这个阶段要完成什么？"
-          />
+          <textarea id="milestone-desc" v-model="milestoneForm.description" class="textarea" placeholder="这个阶段要完成什么？" />
         </div>
 
         <div class="form-grid">
@@ -2000,21 +1534,31 @@ onBeforeUnmount(() => {
             <label class="field-label" for="milestone-direction">所属发展方向</label>
             <select id="milestone-direction" v-model="milestoneForm.directionId" class="select">
               <option value="" disabled>请选择方向</option>
-              <option
-                v-for="direction in milestoneDirectionOptions"
-                :key="direction.id"
-                :value="direction.id"
-              >
-                {{ direction.name }}
-              </option>
+              <option v-for="direction in milestoneDirectionOptions" :key="direction.id" :value="direction.id">{{ direction.name }}</option>
             </select>
           </div>
           <div class="field">
+            <label class="field-label" for="milestone-competency">关联能力</label>
+            <select id="milestone-competency" v-model="milestoneForm.competencyId" class="select">
+              <option value="">不关联具体能力（方向级里程碑）</option>
+              <option v-for="competency in milestoneCompetencyOptions" :key="competency.id" :value="competency.id">
+                {{ competency.name }}
+              </option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="field">
             <label class="field-label" for="milestone-importance">重要性</label>
             <select id="milestone-importance" v-model="milestoneForm.importance" class="select">
-              <option v-for="importance in importances" :key="importance" :value="importance">
-                {{ importanceLabels[importance] }}
-              </option>
+              <option v-for="importance in importances" :key="importance" :value="importance">{{ importanceLabels[importance] }}</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field-label" for="milestone-status">状态</label>
+            <select id="milestone-status" v-model="milestoneForm.status" class="select">
+              <option v-for="status in milestoneStatuses" :key="status" :value="status">{{ milestoneStatusLabels[status] }}</option>
             </select>
           </div>
         </div>
@@ -2031,30 +1575,15 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="field">
-          <label class="field-label" for="milestone-status">状态</label>
-          <select id="milestone-status" v-model="milestoneForm.status" class="select">
-            <option v-for="status in milestoneStatuses" :key="status" :value="status">
-              {{ milestoneStatusLabels[status] }}
-            </option>
-          </select>
-        </div>
-
-        <div class="field">
           <label class="field-label" for="milestone-criteria">验收条件</label>
-          <textarea
-            id="milestone-criteria"
-            v-model="milestoneForm.successCriteria"
-            class="textarea"
-            placeholder="达到什么标准才算完成？最好附上可验证的成果。"
-          />
+          <textarea id="milestone-criteria" v-model="milestoneForm.successCriteria" class="textarea" placeholder="达到什么标准才算完成？最好附上可验证的成果。" />
         </div>
 
         <p class="field-hint">
-          里程碑可直接关联目标和任务；时间线负责时间范围与阶段成果，目标与任务负责具体推进。
+          里程碑归属于方向；关联能力后，它会直接出现在对应能力节点下，并进入 S 型总时间线。
         </p>
 
         <p v-if="formError" class="form-error">{{ formError }}</p>
-
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" @click="resetModal">取消</button>
           <button type="submit" class="btn btn-primary" :disabled="saving">
@@ -3435,6 +2964,676 @@ onBeforeUnmount(() => {
 @media (max-width: 620px) {
   .milestone-detail-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+
+
+/* 融合后的路线图结构 */
+.roadmap-toolbar {
+  background: color-mix(in srgb, var(--surface) 92%, var(--accent-soft));
+}
+
+.toolbar-leading {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.toolbar-label {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.toolbar-help {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.directions-section {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.direction-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.direction-card {
+  overflow: hidden;
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.direction-card:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.direction-card-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+}
+
+.direction-summary {
+  display: grid;
+  grid-template-columns: 8px minmax(240px, 1.25fr) minmax(235px, 0.9fr) minmax(170px, 0.65fr) auto;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
+  padding: 19px 18px 19px 20px;
+  text-align: left;
+}
+
+.direction-summary:hover {
+  background: color-mix(in srgb, var(--surface-muted) 55%, transparent);
+}
+
+.direction-swatch {
+  align-self: stretch;
+  width: 7px;
+  min-height: 64px;
+  border-radius: var(--radius-pill);
+}
+
+.direction-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 3px;
+}
+
+.direction-kicker {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.direction-copy strong {
+  color: var(--ink);
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.direction-description {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.direction-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 14px;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.direction-metrics b {
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.direction-metrics .next-node {
+  flex-basis: 100%;
+  color: var(--ink-soft);
+}
+
+.direction-progress-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 150px;
+}
+
+.direction-progress-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.direction-progress-label b {
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+}
+
+.direction-progress-box .direction-progress-track {
+  width: 100%;
+  height: 6px;
+}
+
+.direction-expand {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.direction-expand .icon {
+  transition: transform 0.18s var(--ease-out);
+}
+
+.direction-expand .icon.rotated {
+  transform: rotate(90deg);
+}
+
+.direction-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 12px 0 2px;
+  border-left: 1px solid var(--line-faint);
+}
+
+.direction-body {
+  padding: 0 20px 19px;
+  border-top: 1px solid var(--line-faint);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--surface-muted) 42%, transparent), transparent 90px),
+    var(--surface);
+}
+
+.ability-tree-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 2px 11px;
+}
+
+.ability-tree-head > div {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.ability-tree-head strong {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.ability-tree-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ability-tree-count {
+  flex: none;
+  font-family: var(--font-mono);
+}
+
+.direction-ability-tree {
+  margin: 0;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.unlinked-milestones {
+  margin-top: 13px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-muted);
+}
+
+.unlinked-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 13px;
+  border-bottom: 1px solid var(--line-faint);
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.unlinked-head > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.unlinked-head > span:last-child {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.unlinked-milestone {
+  display: grid;
+  grid-template-columns: 94px minmax(0, 1fr) auto 16px;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 13px;
+  border-bottom: 1px solid var(--line-faint);
+  text-align: left;
+}
+
+.unlinked-milestone:last-child {
+  border-bottom: 0;
+}
+
+.unlinked-milestone:hover {
+  background: var(--surface);
+}
+
+.unlinked-date {
+  color: var(--ink-soft);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.unlinked-name {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.direction-body-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 13px;
+}
+
+.s-timeline-card {
+  overflow: hidden;
+}
+
+.s-timeline-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 22px;
+  padding: 20px 22px 17px;
+  border-bottom: 1px solid var(--line-faint);
+  background:
+    radial-gradient(90% 120% at 100% 0%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 55%),
+    var(--surface);
+  flex-wrap: wrap;
+}
+
+.timeline-eyebrow {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.timeline-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: 21px;
+  font-weight: 600;
+}
+
+.timeline-title .icon {
+  color: var(--accent);
+}
+
+.timeline-subtitle {
+  margin-top: 5px;
+  color: var(--ink-soft);
+  font-size: 13px;
+}
+
+.s-timeline-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.s-timeline-board {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 24px 22px 18px;
+  background:
+    radial-gradient(120% 90% at 0% 0%, color-mix(in srgb, var(--accent) 4%, transparent), transparent 48%),
+    var(--surface);
+}
+
+.s-timeline-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  align-items: stretch;
+}
+
+.s-timeline-node {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 15px 15px 13px;
+  border: 1px solid var(--line);
+  border-top: 3px solid var(--node-color);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-xs);
+  text-align: left;
+  transition:
+    transform 0.18s var(--ease-out),
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.s-timeline-node:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--node-color) 42%, var(--line));
+  box-shadow: var(--shadow-sm);
+}
+
+.s-node-order {
+  position: absolute;
+  top: 11px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.s-node-date {
+  color: var(--node-color);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 650;
+}
+
+.s-timeline-node > strong {
+  margin: 8px 26px 9px 0;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+.s-node-context {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.s-node-context span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.s-node-context span:first-child {
+  color: var(--ink-soft);
+  font-weight: 550;
+}
+
+.s-node-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: auto;
+  padding-top: 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.s-timeline-connector {
+  position: relative;
+  height: 34px;
+}
+
+.s-timeline-connector::before {
+  position: absolute;
+  top: 0;
+  width: 30px;
+  height: 24px;
+  border-bottom: 1.5px dashed color-mix(in srgb, var(--accent) 34%, var(--line));
+  content: '';
+}
+
+.s-timeline-connector.at-right::before {
+  right: 9%;
+  border-right: 1.5px dashed color-mix(in srgb, var(--accent) 34%, var(--line));
+  border-bottom-right-radius: 14px;
+}
+
+.s-timeline-connector.at-left::before {
+  left: 9%;
+  border-left: 1.5px dashed color-mix(in srgb, var(--accent) 34%, var(--line));
+  border-bottom-left-radius: 14px;
+}
+
+.s-timeline-connector span {
+  position: absolute;
+  top: 17px;
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid var(--accent);
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.s-timeline-connector.at-right span {
+  right: calc(9% - 3px);
+}
+
+.s-timeline-connector.at-left span {
+  left: calc(9% - 3px);
+}
+
+.s-timeline-foot {
+  display: flex;
+  align-items: center;
+  gap: 9px 18px;
+  padding: 12px 22px;
+  border-top: 1px solid var(--line-faint);
+  color: var(--muted);
+  font-size: 11.5px;
+  flex-wrap: wrap;
+  background: var(--surface-muted);
+}
+
+.s-timeline-foot > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-node {
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.linked-competency-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px 12px;
+  border: 1px solid var(--line-faint);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+}
+
+.linked-competency-card .tag-dot {
+  margin-top: 5px;
+}
+
+.linked-competency-card > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.linked-competency-card strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.linked-competency-card span {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+@media (max-width: 1180px) {
+  .direction-summary {
+    grid-template-columns: 8px minmax(220px, 1fr) minmax(190px, 0.75fr) auto;
+  }
+
+  .direction-progress-box {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .direction-summary {
+    grid-template-columns: 7px minmax(0, 1fr) auto;
+    gap: 12px;
+  }
+
+  .direction-metrics {
+    grid-column: 2 / -1;
+  }
+
+  .direction-expand {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .s-timeline-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .s-timeline-node {
+    min-height: 150px;
+  }
+}
+
+@media (max-width: 760px) {
+  .direction-card-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .direction-summary {
+    grid-template-columns: 6px minmax(0, 1fr);
+    padding: 15px;
+  }
+
+  .direction-swatch {
+    grid-row: 1 / span 3;
+  }
+
+  .direction-copy {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .direction-expand {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+    margin-top: 3px;
+  }
+
+  .direction-metrics {
+    grid-column: 2;
+    grid-row: 3;
+  }
+
+  .direction-description {
+    white-space: normal;
+  }
+
+  .direction-actions {
+    justify-content: flex-end;
+    padding: 7px 10px;
+    border-top: 1px solid var(--line-faint);
+    border-left: 0;
+  }
+
+  .direction-body {
+    padding: 0 11px 14px;
+  }
+
+  .direction-ability-tree {
+    padding: 0 7px;
+  }
+
+  .ability-tree-head > div {
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .unlinked-milestone {
+    grid-template-columns: 80px minmax(0, 1fr) 16px;
+  }
+
+  .unlinked-milestone .badge {
+    display: none;
+  }
+
+  .s-timeline-head,
+  .s-timeline-board {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  .s-timeline-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .s-timeline-connector {
+    height: 24px;
+  }
+
+  .s-timeline-connector::before,
+  .s-timeline-connector span {
+    display: none;
   }
 }
 </style>

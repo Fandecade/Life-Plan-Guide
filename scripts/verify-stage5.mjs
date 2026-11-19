@@ -200,6 +200,8 @@ try {
   await clickText(page, '.modal-actions button', '完成并保存')
   await waitText(page, '学习会话已完成', 20000)
   await waitModalClosed(page)
+  await page.click('button[aria-label="关闭成果卡片"]')
+  await page.waitForFunction(() => !document.querySelector('.outcome-card'), { timeout: 8000 })
   await waitText(page, '开始一次学习会话')
   pass('完成学习会话', '时长、实际表现与反思记录')
 
@@ -270,7 +272,14 @@ try {
   await clickText(page, '.view-tab', '复习')
   await page.waitForSelector('.due-card', { timeout: 8000 })
   await clickText(page, '.due-card button', '开始复习')
-  await page.waitForSelector('#review-recall', { timeout: 8000 })
+  await page.waitForSelector('#review-recall-draft', { timeout: 8000 })
+  await setInput(
+    page,
+    '#review-recall-draft',
+    'WalkSAT 会从当前未满足的子句中选一个变量，再按噪声概率随机翻转，或以较大概率选择让最多子句得到满足的变量。',
+  )
+  await clickText(page, '.modal-actions button, .recall-reveal', '显示参考内容')
+  await page.waitForSelector('#review-recall:not([disabled])', { timeout: 8000 })
   await setSelect(page, '#review-recall', '4')
   await setInput(page, '#review-difficulty', '2')
   await clickText(page, '.modal-actions button', '记录复习结果')

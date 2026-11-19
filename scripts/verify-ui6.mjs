@@ -22,6 +22,17 @@ async function clickText(page, selector, text) {
   throw new Error(`未找到包含“${text}”的元素：${selector}`)
 }
 
+async function setSelect(page, selector, value) {
+  await page.$eval(
+    selector,
+    (element, next) => {
+      element.value = next
+      element.dispatchEvent(new Event('change', { bubbles: true }))
+    },
+    value,
+  )
+}
+
 async function waitText(page, text, timeout = 15000) {
   await page.waitForFunction(
     (needle) => document.body.innerText.includes(needle),
@@ -238,45 +249,74 @@ try {
   )
   pass('四象限排序持久化', '刷新后顺序保持不变')
 
-  // Roadmap: 能力完整度、推导阶段、日期微调与时间线
+  // Roadmap: 方向摘要、融合能力树与 S 型总时间线
   await clickText(page, 'a.nav-item', '发展路线')
   await page.waitForSelector('.roadmap', { timeout: 15000 })
-  await page.waitForSelector('.direction-progress-grid', { timeout: 10000 })
-  const progressCards = await page.$$eval('.direction-progress-card', (nodes) => nodes.length)
-  assert(progressCards >= 2, `方向能力完整度卡片不足，实际 ${progressCards}`)
-  pass('方向能力完整度', `${progressCards} 个方向卡片与进度条`)
-
-  await clickText(page, '.view-tab', '里程碑')
-  await page.waitForSelector('.milestone-board', { timeout: 8000 })
-  await page.waitForSelector('.stage-list', { timeout: 8000 })
-  const stageCards = await page.$$eval('.stage-card', (nodes) => nodes.length)
-  const stageAddButtons = await page.$$eval('.stage-add-btn', (nodes) => nodes.length)
-  const milestoneCards = await page.$$eval('.milestone-card', (nodes) => nodes.length)
-  assert(stageCards >= 2, `阶段卡片不足，实际 ${stageCards}`)
-  assert(stageAddButtons >= 2, `阶段里程碑入口不足，实际 ${stageAddButtons}`)
-  assert(milestoneCards >= 2, `里程碑卡片不足，实际 ${milestoneCards}`)
-
-  const stageRangeBefore = await textOf(page, '.stage-card .stage-range')
-  await page.click('.stage-card:first-of-type button[aria-label$="延后一天"]')
-  await waitText(page, '已延后 1 天')
-  await page.waitForFunction(
-    (before) =>
-      (document.querySelector('.stage-card .stage-range')?.textContent ?? '').trim() !== before,
-    { timeout: 8000, polling: 100 },
-    stageRangeBefore,
-  )
-  const stageRangeAfter = await textOf(page, '.stage-card .stage-range')
+  await page.waitForSelector('.direction-card', { timeout: 10000 })
+  const initialRoadmap = await page.evaluate(() => ({
+    directions: document.querySelectorAll('.direction-card').length,
+    openTrees: document.querySelectorAll('.direction-body').length,
+    abilityNodes: document.querySelectorAll('.ability-node').length,
+    timelineNodes: document.querySelectorAll('.s-timeline-node').length,
+    snakeMode: document.querySelector('.s-timeline-board')?.getAttribute('data-timeline-mode'),
+  }))
+  assert(initialRoadmap.directions >= 2, `发展方向不足：${initialRoadmap.directions}`)
+  assert(initialRoadmap.openTrees === 0, `路线图默认不应展开能力树，实际 ${initialRoadmap.openTrees}`)
+  assert(initialRoadmap.abilityNodes === 0, `默认不应显示能力节点，实际 ${initialRoadmap.abilityNodes}`)
+  assert(initialRoadmap.timelineNodes >= 2, `S 型时间线节点不足：${initialRoadmap.timelineNodes}`)
+  assert(initialRoadmap.snakeMode === 'snake', '总时间线未启用 S 型排布')
   pass(
-    '阶段轨道与边界调整',
-    `${stageCards} 个阶段 · ${milestoneCards} 个里程碑 · ${stageRangeBefore} → ${stageRangeAfter}`,
+    '路线图默认折叠与 S 型时间线',
+    `${initialRoadmap.directions} 个方向摘要 · ${initialRoadmap.timelineNodes} 个时间节点`,
   )
 
-  await page.click('.stage-card:first-of-type .stage-open-btn')
+  await page.click('.direction-card:first-of-type .direction-summary')
+  await page.waitForSelector('.direction-card:first-of-type .ability-node', { timeout: 8000 })
+  const treeNodeCount = await page.$$eval(
+    '.direction-card:first-of-type .ability-node',
+    (nodes) => nodes.length,
+  )
+  const detailCountBefore = await page.$$eval('.ability-detail', (nodes) => nodes.length)
+  assert(treeNodeCount >= 2, `展开方向后能力节点不足：${treeNodeCount}`)
+  assert(detailCountBefore === 0, `能力详情默认不应展开，实际 ${detailCountBefore}`)
+  pass('展开方向能力树', `${treeNodeCount} 个能力节点，能力详情仍折叠`)
+
+  const expandAbility = async (name) => {
+    const result = await page.evaluate((abilityName) => {
+      const node = Array.from(document.querySelectorAll('.ability-node')).find(
+        (element) => element.dataset.abilityName === abilityName,
+      )
+      if (!node) return false
+      const button = node.querySelector(':scope > .ability-row .ability-expand')
+      if (!button) return false
+      if (button.getAttribute('aria-expanded') !== 'true') button.click()
+      return true
+    }, name)
+    if (!result) throw new Error(`未找到能力节点：${name}`)
+  }
+
+  await expandAbility('算法与数据结构')
+  await page.waitForFunction(
+    () =>
+      Array.from(document.querySelectorAll('.ability-node')).some(
+        (node) => node.dataset.abilityName === 'SAT 与局部搜索',
+      ),
+    { timeout: 8000 },
+  )
+  await expandAbility('SAT 与局部搜索')
+  await page.waitForSelector('.ability-milestone', { timeout: 8000 })
+  const linkedMilestoneText = await page.$eval(
+    '.ability-milestone',
+    (node) => (node.textContent ?? '').trim(),
+  )
+  assert(linkedMilestoneText.includes('独立完成 SAT 算法复现实验'), '能力节点下未显示关联里程碑')
+  pass('能力树与里程碑融合', '展开能力后直接看到里程碑和对应时间节点')
+
+  await page.click('.ability-milestone')
   await page.waitForSelector('.drawer-panel', { timeout: 8000 })
+  await waitText(page, '验收条件')
   await waitText(page, '快速调整日期')
-  await waitText(page, '相关能力')
-  await waitText(page, '能力完整度')
-  const datesBefore = await page.$$eval('.milestone-detail-grid strong', (nodes) =>
+  const milestoneDatesBefore = await page.$$eval('.milestone-detail-grid strong', (nodes) =>
     nodes.slice(0, 2).map((node) => (node.textContent ?? '').trim()),
   )
   await page.click('.milestone-date-editor .date-shift-btn')
@@ -289,44 +329,48 @@ try {
       return current.some((value, index) => value !== previous[index])
     },
     { timeout: 8000, polling: 100 },
-    datesBefore,
+    milestoneDatesBefore,
   )
-  const datesAfter = await page.$$eval('.milestone-detail-grid strong', (nodes) =>
-    nodes.slice(0, 2).map((node) => (node.textContent ?? '').trim()),
-  )
-  pass('里程碑详情日期微调', `${datesBefore.join(' / ')} → ${datesAfter.join(' / ')}`)
+  pass('能力里程碑详情', '验收条件与日期微调可直接从能力节点进入')
   await closeDrawer(page)
 
-  await clickText(page, '.view-tab', '时间线')
-  await page.waitForSelector('.timeline-scroll', { timeout: 8000 })
-  const phaseBars = await page.$$eval('.timeline-phase', (nodes) => nodes.length)
-  const milestoneBars = await page.$$eval('.timeline-bar', (nodes) => nodes.length)
-  const legendItems = await page.$$eval('.timeline-legend', (nodes) => nodes.length)
-  const scaleButtons = await page.$$eval('.scale-switch button', (nodes) => nodes.length)
-  assert(phaseBars >= 2, `时间线阶段区间不足，实际 ${phaseBars}`)
-  assert(milestoneBars >= 2, `时间线里程碑条不足，实际 ${milestoneBars}`)
-  assert(legendItems >= 4, `时间线图例不足，实际 ${legendItems}`)
-  assert(scaleButtons === 4, `时间尺度应含年/季/月/周，实际 ${scaleButtons}`)
-  await clickText(page, '.scale-switch button', '周')
+  const researchDirection = await page.$$eval(
+    'select[aria-label="时间线方向范围"] option',
+    (options) => {
+      const option = options.find((item) => (item.textContent ?? '').includes('研究生学业与科研'))
+      return option ? option.value : ''
+    },
+  )
+  assert(researchDirection, '时间线缺少研究生学业与科研筛选项')
+  await setSelect(page, 'select[aria-label="时间线方向范围"]', researchDirection)
   await page.waitForFunction(
-    () => document.querySelectorAll('.scale-switch button.active')[0]?.textContent?.trim() === '周',
-    { timeout: 8000, polling: 100 },
+    () => document.querySelectorAll('.s-timeline-node').length === 1,
+    { timeout: 8000 },
   )
-  pass(
-    '时间线阶段层',
-    `${phaseBars} 个推导阶段 · ${milestoneBars} 个里程碑条 · ${legendItems} 个图例`,
+  const filteredTimelineText = await page.$eval(
+    '.s-timeline-node',
+    (node) => (node.textContent ?? '').trim(),
   )
+  assert(filteredTimelineText.includes('SAT 算法复现实验'), '方向筛选后的时间线节点不正确')
+  pass('S 型时间线方向筛选', '筛选后只保留研究生方向的里程碑')
 
+  await setSelect(page, 'select[aria-label="时间线方向范围"]', 'all')
+  await page.waitForFunction(
+    () => document.querySelectorAll('.s-timeline-node').length >= 2,
+    { timeout: 8000 },
+  )
   await delay(400)
   await page.screenshot({ path: '/tmp/growth-os-ui6-roadmap.png', fullPage: true })
   pass('桌面截图', '/tmp/growth-os-ui6-roadmap.png')
 
   // 390px 窄屏：核心新增页面不能造成页面级横向滚动
   await page.setViewport({ width: 390, height: 844 })
-  await assertNoHorizontalOverflow(page, '路线图时间线')
-  await clickText(page, '.view-tab', '能力地图')
-  await page.waitForSelector('.direction-progress-grid', { timeout: 8000 })
-  await assertNoHorizontalOverflow(page, '路线图能力地图')
+  await assertNoHorizontalOverflow(page, '路线图 S 型时间线')
+  const mobileDirectionWidth = await page.$eval(
+    '.direction-copy',
+    (node) => node.getBoundingClientRect().width,
+  )
+  assert(mobileDirectionWidth > 200, `390px 方向摘要宽度异常：${mobileDirectionWidth}`)
 
   await page.goto(new URL('review', APP_URL).toString(), { waitUntil: 'networkidle0' })
   await page.waitForSelector('.review-page', { timeout: 15000 })

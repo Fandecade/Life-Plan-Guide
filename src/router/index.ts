@@ -39,7 +39,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       title: '发展路线图',
       section: '方向与路线',
-      subtitle: '能力地图、里程碑与多轨道时间线',
+      subtitle: '方向能力树、能力里程碑与 S 型路线时间线',
       phase: 3,
     },
   },

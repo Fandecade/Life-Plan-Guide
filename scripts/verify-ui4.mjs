@@ -77,102 +77,168 @@ try {
   await page.waitForSelector('.dashboard-grid', { timeout: 15000 })
 
   await clickText(page, 'a.nav-item', '发展路线')
-  await page.waitForSelector('.map-card', { timeout: 15000 })
-  pass('进入发展路线')
+  await page.waitForSelector('.direction-card', { timeout: 15000 })
+  const initialRoadmap = await page.evaluate(() => ({
+    directions: document.querySelectorAll('.direction-card').length,
+    openTrees: document.querySelectorAll('.direction-body').length,
+    abilityNodes: document.querySelectorAll('.ability-node').length,
+    timelineNodes: document.querySelectorAll('.s-timeline-node').length,
+    snakeMode: document.querySelector('.s-timeline-board')?.getAttribute('data-timeline-mode'),
+  }))
+  assert(initialRoadmap.directions >= 2, `发展方向不足：${initialRoadmap.directions}`)
+  assert(initialRoadmap.openTrees === 0, `路线图默认不应展开能力树，实际 ${initialRoadmap.openTrees}`)
+  assert(initialRoadmap.abilityNodes === 0, `默认不应显示能力节点，实际 ${initialRoadmap.abilityNodes}`)
+  assert(initialRoadmap.timelineNodes >= 2, `S 型时间线节点不足：${initialRoadmap.timelineNodes}`)
+  assert(initialRoadmap.snakeMode === 'snake', '总时间线未启用 S 型排布')
+  pass('克制默认视图', `${initialRoadmap.directions} 个方向折叠 · ${initialRoadmap.timelineNodes} 个时间节点`)
 
-  await page.evaluate(() => {
-    const node = Array.from(document.querySelectorAll('.tree-node')).find(
-      (element) =>
-        (element.querySelector('.node-name')?.textContent ?? '').trim() ===
-        'SAT 与局部搜索',
-    )
-    if (!node) throw new Error('未找到 SAT 能力节点')
-    const main = node.querySelector('.node-main')
-    if (!main) throw new Error('能力节点缺少详情入口')
-    main.click()
-  })
+  await page.click('.direction-card:first-of-type .direction-summary')
+  await page.waitForSelector('.direction-card:first-of-type .ability-node', { timeout: 8000 })
+  const treeNodeCount = await page.$$eval(
+    '.direction-card:first-of-type .ability-node',
+    (nodes) => nodes.length,
+  )
+  const detailCountBefore = await page.$$eval('.ability-detail', (nodes) => nodes.length)
+  assert(treeNodeCount >= 2, `展开方向后能力节点不足：${treeNodeCount}`)
+  assert(detailCountBefore === 0, `能力详情默认不应展开，实际 ${detailCountBefore}`)
+  pass('展开方向能力树', `${treeNodeCount} 个能力节点，能力详情仍折叠`)
+
+  const findAbilityButton = async (name, selector = '.ability-main') => {
+    const nodes = await page.$$('.ability-node')
+    for (const node of nodes) {
+      const title = await node
+        .$eval('.ability-name-line strong', (element) => (element.textContent ?? '').trim())
+        .catch(() => '')
+      if (title !== name) continue
+      const button = await node.$(selector)
+      if (!button) throw new Error(`${name} 缺少 ${selector}`)
+      await node.evaluate((element) => element.scrollIntoView({ block: 'center' }))
+      await button.click()
+      return node
+    }
+    throw new Error(`未找到能力节点：${name}`)
+  }
+
+  await findAbilityButton('算法与数据结构', '.ability-expand')
+  await page.waitForFunction(
+    () => Array.from(document.querySelectorAll('.ability-name-line strong')).some(
+      (node) => (node.textContent ?? '').trim() === 'SAT 与局部搜索',
+    ),
+    { timeout: 8000 },
+  )
+  await findAbilityButton('SAT 与局部搜索', '.ability-expand')
+  await page.waitForSelector('.ability-milestone', { timeout: 8000 })
+  const linkedMilestoneText = await page.$eval(
+    '.ability-milestone',
+    (node) => (node.textContent ?? '').trim(),
+  )
+  assert(linkedMilestoneText.includes('独立完成 SAT 算法复现实验'), '能力节点下未显示关联里程碑')
+  pass('能力与里程碑融合', '展开能力后同时显示里程碑和对应时间节点')
+
+  await findAbilityButton('SAT 与局部搜索')
   await page.waitForSelector('.drawer-panel', { timeout: 8000 })
   await waitText(page, '成长曲线')
   await waitText(page, '评价标准')
+  await waitText(page, '关联发展方向')
   const growthSvg = await page.$$eval('.growth-svg', (nodes) => nodes.length)
   assert(growthSvg === 1, '能力详情未渲染成长曲线')
-  await waitText(page, '关联发展方向')
   pass('能力节点详情', '等级、评价标准、方向与成长曲线')
   await closeDrawer(page)
 
-  await clickText(page, '.view-tab', '里程碑')
-  await page.waitForSelector('.milestone-board', { timeout: 8000 })
-  await setSelect(page, 'select[aria-label="按里程碑状态筛选"]', 'IN_PROGRESS')
+  await setSelect(page, 'select[aria-label="时间线方向范围"]', await page.$eval(
+    'select[aria-label="时间线方向范围"] option:nth-child(2)',
+    (element) => element.value,
+  ))
   await page.waitForFunction(
-    () => document.querySelectorAll('.milestone-card').length === 1,
+    () => document.querySelectorAll('.s-timeline-node').length === 1,
     { timeout: 8000 },
   )
-  pass('里程碑状态筛选', '进行中：1 条')
-  await setSelect(page, 'select[aria-label="按里程碑状态筛选"]', 'ALL')
-  await setSelect(page, 'select[aria-label="按重要程度筛选"]', 'CRITICAL')
-  await page.waitForFunction(
-    () => document.querySelectorAll('.milestone-card').length === 1,
-    { timeout: 8000 },
+  const directionTimelineNode = await page.$eval(
+    '.s-timeline-node',
+    (node) => (node.textContent ?? '').trim(),
   )
-  pass('里程碑重要度筛选', '关键：1 条')
-  await setSelect(page, 'select[aria-label="按重要程度筛选"]', 'ALL')
+  assert(directionTimelineNode.includes('SAT 算法复现实验'), '方向筛选后的时间线节点不正确')
+  pass('时间线方向筛选', '仅保留研究生方向的 1 个时间节点')
 
-  await clickText(page, '.milestone-name-btn', '独立完成 SAT 算法复现实验')
+  const satTimelineOption = await page.$$eval(
+    'select[aria-label="时间线能力范围"] option',
+    (options) => {
+      const option = options.find((item) => (item.textContent ?? '').includes('SAT 与局部搜索'))
+      return option ? { value: option.value, text: option.textContent?.trim() ?? '' } : null
+    },
+  )
+  assert(satTimelineOption, '时间线能力筛选缺少 SAT 与局部搜索')
+  await setSelect(page, 'select[aria-label="时间线能力范围"]', satTimelineOption.value)
+  await page.waitForFunction(
+    () => document.querySelectorAll('.s-timeline-node').length === 1,
+    { timeout: 8000 },
+  )
+  pass('时间线能力筛选', '可按具体能力收敛到单个里程碑')
+
+  await page.click('.s-timeline-node')
   await page.waitForSelector('.drawer-panel', { timeout: 8000 })
   await waitText(page, '验收条件')
   await waitText(page, '关联目标（1）')
   await waitText(page, '掌握 ACO 求解 SAT 的基本原理与实现')
-  pass('里程碑详情抽屉', '日期、验收条件与关联目标')
+  const datesBefore = await page.$$eval('.milestone-detail-grid strong', (nodes) =>
+    nodes.slice(0, 2).map((node) => (node.textContent ?? '').trim()),
+  )
+  await page.click('.milestone-date-editor .date-shift-btn')
+  await waitText(page, '已提前 1 天')
+  await page.waitForFunction(
+    (previous) => {
+      const current = Array.from(document.querySelectorAll('.milestone-detail-grid strong'))
+        .slice(0, 2)
+        .map((node) => (node.textContent ?? '').trim())
+      return current.some((value, index) => value !== previous[index])
+    },
+    { timeout: 8000, polling: 100 },
+    datesBefore,
+  )
+  pass('S 型节点详情与日期微调', '验收条件、关联目标与日期微调均可操作')
   await closeDrawer(page)
 
-  await clickText(page, '.view-tab', '时间线')
-  await page.waitForSelector('.timeline-table', { timeout: 8000 })
-  await clickText(page, '.scale-switch button', '月')
-  await delay(200)
-  const monthTicks = await page.$$eval('.tick', (nodes) => nodes.length)
-  await clickText(page, '.scale-switch button', '周')
-  await delay(200)
-  const weekTicks = await page.$$eval('.tick', (nodes) => nodes.length)
-  assert(weekTicks > monthTicks, `周刻度应多于月刻度：${weekTicks} / ${monthTicks}`)
-  pass('时间线缩放', `月 ${monthTicks} 刻度 → 周 ${weekTicks} 刻度`)
-
-  await delay(700)
+  await setSelect(page, 'select[aria-label="时间线方向范围"]', 'all')
+  await setSelect(page, 'select[aria-label="时间线能力范围"]', 'all')
+  await page.waitForFunction(
+    () => document.querySelectorAll('.s-timeline-node').length >= 2,
+    { timeout: 8000 },
+  )
+  await delay(450)
   await page.screenshot({ path: '/tmp/growth-os-ui4-roadmap.png', fullPage: true })
   pass('路线图截图', '/tmp/growth-os-ui4-roadmap.png')
 
-  await clickText(page, '.scale-switch button', '年')
-  await delay(250)
-  const bars = await page.$$('.timeline-bar')
-  let targetBar = null
-  for (const bar of bars) {
-    const content = await bar.evaluate((node) => (node.textContent ?? '').trim())
-    if (content.includes('独立完成 SAT 算法复现实验')) {
-      targetBar = bar
-      break
-    }
-  }
-  assert(targetBar, '未找到用于拖拽的里程碑条')
-  await targetBar.evaluate((node) =>
-    node.scrollIntoView({ block: 'center', inline: 'center' }),
-  )
-  await delay(200)
-  const box = await targetBar.boundingBox()
-  assert(box, '里程碑条没有可拖拽区域')
-  const startX = box.x + box.width / 2
-  const startY = box.y + box.height / 2
-  await page.mouse.move(startX, startY)
-  await page.mouse.down()
-  await page.mouse.move(startX + 80, startY, { steps: 8 })
-  await page.mouse.up()
-  await waitText(page, '里程碑日期已调整', 15000)
-  pass('拖动里程碑调整日期')
-  await delay(400)
-
   await page.reload({ waitUntil: 'networkidle0' })
-  await page.waitForSelector('.map-card', { timeout: 15000 })
-  await clickText(page, '.view-tab', '时间线')
-  await page.waitForSelector('.timeline-table', { timeout: 10000 })
-  pass('刷新后路线图持久化')
+  await page.waitForSelector('.direction-card', { timeout: 15000 })
+  await page.waitForSelector('.s-timeline-node', { timeout: 10000 })
+  const persistedRoadmap = await page.evaluate(() => ({
+    openTrees: document.querySelectorAll('.direction-body').length,
+    timeline: Array.from(document.querySelectorAll('.s-timeline-node')).map(
+      (node) => (node.textContent ?? '').trim(),
+    ),
+  }))
+  assert(persistedRoadmap.openTrees === 0, '刷新后方向应恢复为默认折叠')
+  assert(
+    persistedRoadmap.timeline.some((text) => text.includes('SAT 算法复现实验')),
+    '刷新后 S 型时间线未保留里程碑',
+  )
+  pass('刷新后路线图持久化', '默认保持折叠，里程碑时间节点仍存在')
+
+  await page.setViewport({ width: 390, height: 844 })
+  await delay(350)
+  const mobileRoadmap = await page.evaluate(() => ({
+    viewport: window.innerWidth,
+    document: document.documentElement.scrollWidth,
+    body: document.body.scrollWidth,
+    copyWidth: document.querySelector('.direction-copy')?.getBoundingClientRect().width ?? 0,
+  }))
+  assert(
+    mobileRoadmap.document <= mobileRoadmap.viewport + 1 &&
+      mobileRoadmap.body <= mobileRoadmap.viewport + 1,
+    `390px 路线图横向溢出：${JSON.stringify(mobileRoadmap)}`,
+  )
+  assert(mobileRoadmap.copyWidth > 200, `390px 方向摘要宽度异常：${mobileRoadmap.copyWidth}`)
+  pass('390px 路线图响应式', `方向摘要可用宽度 ${Math.round(mobileRoadmap.copyWidth)}px，无页面级横向溢出`)
 
   assert(
     consoleErrors.length === 0,

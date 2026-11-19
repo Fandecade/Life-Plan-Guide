@@ -230,6 +230,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
 
   const milestonePaper = await repos.milestones.create({
     directionId: directionResearch.id,
+    competencyId: competencySat.id,
     name: '独立完成 SAT 算法复现实验',
     description: '从论文阅读到代码实现、基准测试和实验分析，形成完整复现报告。',
     startDate: at(-14, 9),
@@ -241,6 +242,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
 
   const milestoneEmbedded = await repos.milestones.create({
     directionId: directionEngineering.id,
+    competencyId: competencyLinux.id,
     name: '完成一个嵌入式 Linux 小项目',
     description: '实现字符设备驱动，并在开发板上完成读写验证。',
     startDate: at(7, 9),

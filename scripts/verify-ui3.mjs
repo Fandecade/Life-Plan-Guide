@@ -148,22 +148,24 @@ try {
 
   await clickText(page, '.roadmap-link', '在发展路线中查看')
   await page.waitForFunction(() => location.pathname === '/roadmap', { timeout: 10000 })
-  await page.waitForSelector('.direction-filter', { timeout: 15000 })
+  await page.waitForSelector('.direction-card', { timeout: 15000 })
   await page.waitForFunction(() => location.search === '', { timeout: 10000 })
   const directionFilterText = await page.$eval(
-    '.direction-filter',
+    'select[aria-label="按方向筛选"]',
     (element) => element.selectedOptions[0]?.textContent?.trim() ?? '',
   )
-  const activeRoadmapView = await page.$eval(
-    '.view-tab.active',
-    (node) => node.textContent?.trim() ?? '',
+  const linkedDirectionCards = await page.$$eval('.direction-card', (nodes) =>
+    nodes.map((node) => (node.textContent ?? '').trim()),
   )
+  const linkedAbilityNodes = await page.$$eval('.ability-node', (nodes) => nodes.length)
   assert(
     directionFilterText === '软硬件全栈工程',
     `方向深链未筛选正确方向：${directionFilterText}`,
   )
-  assert(activeRoadmapView.includes('能力地图'), `方向深链未进入能力地图：${activeRoadmapView}`)
-  pass('能力到路线图联动', `已筛选 ${directionFilterText} · ${activeRoadmapView}`)
+  assert(linkedDirectionCards.length === 1, `方向深链应只显示 1 个方向，实际 ${linkedDirectionCards.length}`)
+  assert(linkedDirectionCards[0].includes('软硬件全栈工程'), '方向深链卡片内容不正确')
+  assert(linkedAbilityNodes >= 3, `方向深链未展开能力树，实际 ${linkedAbilityNodes} 个节点`)
+  pass('能力到路线图联动', `已筛选 ${directionFilterText} 并展开 ${linkedAbilityNodes} 个能力节点`)
   await page.screenshot({ path: '/tmp/growth-os-ui3-roadmap-link.png', fullPage: true })
   pass('路线图联动截图', '/tmp/growth-os-ui3-roadmap-link.png')
 

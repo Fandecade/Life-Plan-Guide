@@ -229,7 +229,7 @@ try {
   await page.click('.modal-head button')
   await waitModalClosed(page)
 
-  await clickText(page, '.view-tab', '洞察')
+  await clickText(page, '.view-tab', '趋势与诊断')
   await page.waitForSelector('.heatmap', { timeout: 8000 })
   const heatmapRows = await page.$$eval('.heatmap-row', (nodes) => nodes.length)
   const heatmapCells = await page.$$eval('.heatmap-cell', (nodes) => nodes.length)

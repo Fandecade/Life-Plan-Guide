@@ -20,6 +20,7 @@ export interface Competency extends BaseEntity {
 
 export interface Milestone extends BaseEntity {
   directionId: string
+  competencyId: string | null
   name: string
   description: string
   startDate: string | null
