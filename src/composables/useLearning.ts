@@ -4,6 +4,7 @@ import {
   ReviewScheduleStatus,
   SessionStatus,
   TaskStatus,
+  TimeboxStatus,
   type KnowledgeItem,
   type LearningRecord,
   type LearningSession,
@@ -42,6 +43,16 @@ export function nextReviewInterval(recall: number): number {
   if (recall === 3) return 7
   if (recall === 2) return 3
   return 1
+}
+
+function reviewTimeAt(iso: string): string {
+  const date = new Date(iso)
+  date.setHours(20, 0, 0, 0)
+  return date.toISOString()
+}
+
+function addMinutes(iso: string, minutes: number): string {
+  return new Date(new Date(iso).getTime() + minutes * 60000).toISOString()
 }
 
 export function useLearning() {
@@ -88,15 +99,17 @@ export function useLearning() {
 
   const availableTasks = computed(() =>
     tasks.value
-      .filter(
-        (task) =>
-          !task.archivedAt &&
-          task.status !== TaskStatus.COMPLETED &&
-          task.status !== TaskStatus.CANCELLED,
-      )
+      .filter((task) => !task.archivedAt && task.status !== TaskStatus.CANCELLED)
       .sort((left, right) => {
-        const rank: Record<string, number> = { IN_PROGRESS: 0, TODO: 1, PAUSED: 2, BLOCKED: 3 }
-        return (rank[left.status] ?? 9) - (rank[right.status] ?? 9)
+        const rank: Record<string, number> = {
+          IN_PROGRESS: 0,
+          TODO: 1,
+          PAUSED: 2,
+          BLOCKED: 3,
+          BACKLOG: 4,
+          COMPLETED: 9,
+        }
+        return (rank[left.status] ?? 5) - (rank[right.status] ?? 5)
       }),
   )
 
@@ -186,6 +199,7 @@ export function useLearning() {
     return reviewSchedules.value
       .filter(
         (row) =>
+          row.taskId &&
           (row.status === ReviewScheduleStatus.PENDING ||
             row.status === ReviewScheduleStatus.DUE) &&
           row.scheduledAt <= deadline,
@@ -198,6 +212,7 @@ export function useLearning() {
     return reviewSchedules.value
       .filter(
         (row) =>
+          row.taskId &&
           (row.status === ReviewScheduleStatus.PENDING ||
             row.status === ReviewScheduleStatus.DUE) &&
           row.scheduledAt > deadline,
@@ -207,7 +222,7 @@ export function useLearning() {
 
   const completedReviews = computed(() =>
     reviewSchedules.value
-      .filter((row) => row.status === ReviewScheduleStatus.COMPLETED)
+      .filter((row) => row.taskId && row.status === ReviewScheduleStatus.COMPLETED)
       .sort((left, right) => (right.completedAt ?? '').localeCompare(left.completedAt ?? '')),
   )
 
@@ -293,6 +308,8 @@ export function useLearning() {
       selfPrediction: input.selfPrediction,
       actualAssessment: null,
       actualDuration: 0,
+      completedStages: [],
+      checklistProgress: {},
     })
     now.value = Date.now()
     await refresh()
@@ -301,6 +318,42 @@ export function useLearning() {
 
   async function setStage(sessionId: string, stageKey: string): Promise<void> {
     await repos.learningSessions.update(sessionId, { currentStage: stageKey })
+    await refresh()
+  }
+
+  async function completeStage(
+    sessionId: string,
+    stageKey: string,
+    nextStageKey: string | null,
+  ): Promise<void> {
+    const session = sessions.value.find((row) => row.id === sessionId)
+    if (!session) return
+    const completed = new Set(session.completedStages ?? [])
+    completed.add(stageKey)
+    await repos.learningSessions.update(sessionId, {
+      completedStages: [...completed],
+      currentStage: nextStageKey ?? stageKey,
+    })
+    await refresh()
+  }
+
+  async function toggleChecklistItem(
+    sessionId: string,
+    stageKey: string,
+    item: string,
+    done: boolean,
+  ): Promise<void> {
+    const session = sessions.value.find((row) => row.id === sessionId)
+    if (!session) return
+    const progress: Record<string, string[]> = {}
+    for (const [key, items] of Object.entries(session.checklistProgress ?? {})) {
+      progress[key] = [...items]
+    }
+    const current = new Set(progress[stageKey] ?? [])
+    if (done) current.add(item)
+    else current.delete(item)
+    progress[stageKey] = [...current]
+    await repos.learningSessions.update(sessionId, { checklistProgress: progress })
     await refresh()
   }
 
@@ -332,6 +385,39 @@ export function useLearning() {
         occurredAt: endedAt,
         selfAssessment: input.actualAssessment,
       })
+    }
+    if (input.status === SessionStatus.COMPLETED && session.taskId) {
+      const existing = reviewSchedules.value.find((row) => row.sessionId === sessionId)
+      if (!existing) {
+        const interval = nextReviewInterval(input.actualAssessment ?? 2)
+        const scheduledAt = reviewTimeAt(addDays(endedAt, interval))
+        const timebox = await repos.timeboxes.create({
+          taskId: session.taskId,
+          plannedStart: scheduledAt,
+          plannedEnd: addMinutes(scheduledAt, 30),
+          plannedDuration: 30,
+          actualStart: null,
+          actualEnd: null,
+          actualDuration: 0,
+          status: TimeboxStatus.PLANNED,
+          note: '复习提醒',
+        })
+        await repos.reviewSchedules.create({
+          knowledgeItemId: null,
+          taskId: session.taskId,
+          sessionId,
+          timeboxId: timebox.id,
+          previousTaskStatus: null,
+          scheduledAt,
+          completedAt: null,
+          recallResult: null,
+          difficulty: null,
+          nextReviewAt: null,
+          externalTool: '',
+          externalUrl: '',
+          status: ReviewScheduleStatus.PENDING,
+        })
+      }
     }
     await refresh()
     return entity
@@ -391,43 +477,83 @@ export function useLearning() {
     return entity
   }
 
-  async function completeReview(
-    schedule: ReviewSchedule,
-    recallResult: number,
-    difficulty: number,
-  ): Promise<Date> {
+  async function completeReview(schedule: ReviewSchedule): Promise<void> {
     const completedAt = nowIso()
-    const intervalDays = nextReviewInterval(recallResult)
-    const nextAt = addDays(completedAt, intervalDays)
+    let previousTaskStatus: string | null = null
+    if (schedule.taskId) {
+      const task = tasks.value.find((row) => row.id === schedule.taskId)
+      if (task) {
+        previousTaskStatus = task.status
+        await repos.tasks.update(task.id, {
+          status: TaskStatus.COMPLETED,
 
+        })
+      }
+    }
     await repos.reviewSchedules.update(schedule.id, {
       completedAt,
-      recallResult,
-      difficulty,
-      nextReviewAt: nextAt,
       status: ReviewScheduleStatus.COMPLETED,
+      previousTaskStatus,
+    })
+    await refresh()
+  }
+
+  async function saveTaskReview(taskId: string, scheduledAt: string): Promise<void> {
+    const timebox = await repos.timeboxes.create({
+      taskId,
+      plannedStart: scheduledAt,
+      plannedEnd: addMinutes(scheduledAt, 30),
+      plannedDuration: 30,
+      actualStart: null,
+      actualEnd: null,
+      actualDuration: 0,
+      status: TimeboxStatus.PLANNED,
+      note: '复习提醒',
     })
     await repos.reviewSchedules.create({
-      knowledgeItemId: schedule.knowledgeItemId,
-      scheduledAt: nextAt,
+      knowledgeItemId: null,
+      taskId,
+      sessionId: null,
+      timeboxId: timebox.id,
+      previousTaskStatus: null,
+      scheduledAt,
       completedAt: null,
       recallResult: null,
       difficulty: null,
       nextReviewAt: null,
-      externalTool: schedule.externalTool,
-      externalUrl: schedule.externalUrl,
+      externalTool: '',
+      externalUrl: '',
       status: ReviewScheduleStatus.PENDING,
     })
-    await repos.knowledgeItems.update(schedule.knowledgeItemId, {
-      lastReviewedAt: completedAt,
-    })
     await refresh()
-    return new Date(nextAt)
   }
 
   async function skipReview(scheduleId: string): Promise<void> {
+    const schedule = reviewSchedules.value.find((row) => row.id === scheduleId)
     await repos.reviewSchedules.update(scheduleId, {
       status: ReviewScheduleStatus.SKIPPED,
+    })
+    if (schedule?.timeboxId) {
+      await repos.timeboxes.archive(schedule.timeboxId)
+    }
+    await refresh()
+  }
+
+  async function revertReview(schedule: ReviewSchedule): Promise<void> {
+    if (schedule.taskId) {
+      const task = tasks.value.find((row) => row.id === schedule.taskId)
+      if (task) {
+        const restored =
+          schedule.previousTaskStatus && schedule.previousTaskStatus !== TaskStatus.COMPLETED
+            ? (schedule.previousTaskStatus as TaskStatus)
+            : TaskStatus.IN_PROGRESS
+        await repos.tasks.update(task.id, { status: restored })
+      }
+    }
+    await repos.reviewSchedules.update(schedule.id, {
+      status: ReviewScheduleStatus.PENDING,
+      completedAt: null,
+      previousTaskStatus: null,
     })
     await refresh()
   }
@@ -483,6 +609,8 @@ export function useLearning() {
     setWorkflowArchived,
     startSession,
     setStage,
+    completeStage,
+    toggleChecklistItem,
     finishSession,
     saveRecord,
     archiveRecord,
@@ -491,7 +619,9 @@ export function useLearning() {
     setKnowledgeArchived,
     saveReviewSchedule,
     completeReview,
+    saveTaskReview,
     skipReview,
+    revertReview,
     saveResource,
     setResourceArchived,
   }

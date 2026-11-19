@@ -304,6 +304,11 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
         required: true,
         needsRecord: true,
         externalTool: 'Zotero',
+        checklist: [
+          '读标题、摘要、图表和结论',
+          '写出论文试图解决的问题',
+          '列出 3 个阅读时要验证的问题',
+        ],
       },
       {
         key: 'input',
@@ -314,6 +319,11 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
         required: true,
         needsRecord: false,
         externalTool: null,
+        checklist: [
+          '逐节阅读方法与实验',
+          '标记关键假设、算法步骤和实验设置',
+          '记录不懂的段落与术语',
+        ],
       },
       {
         key: 'output',
@@ -324,6 +334,11 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
         required: true,
         needsRecord: true,
         externalTool: 'Obsidian',
+        checklist: [
+          '关闭论文，写出问题、方法与关键步骤',
+          '画出算法流程图',
+          '标出仍然不确定的地方',
+        ],
       },
       {
         key: 'feedback',
@@ -334,6 +349,11 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
         required: true,
         needsRecord: true,
         externalTool: null,
+        checklist: [
+          '重新打开论文对照输出',
+          '标出遗漏、错误和过度推断',
+          '把偏差整理成待补清单',
+        ],
       },
       {
         key: 'reflection',
@@ -344,6 +364,11 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
         required: false,
         needsRecord: true,
         externalTool: null,
+        checklist: [
+          '写下知识盲区',
+          '确定需要补的基础',
+          '生成下一步任务',
+        ],
       },
     ],
     applicableTaskTypes: [TaskType.LEARNING, TaskType.REVIEW],
@@ -656,6 +681,34 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
     status: ReviewScheduleStatus.COMPLETED,
   })
 
+  const reviewTimebox = await repos.timeboxes.create({
+    taskId: taskDriver.id,
+    plannedStart: at(0, 20),
+    plannedEnd: at(0, 20, 30),
+    plannedDuration: 30,
+    actualStart: null,
+    actualEnd: null,
+    actualDuration: 0,
+    status: 'PLANNED',
+    note: '复习提醒',
+  })
+
+  await repos.reviewSchedules.create({
+    knowledgeItemId: null,
+    taskId: taskDriver.id,
+    sessionId: null,
+    timeboxId: reviewTimebox.id,
+    previousTaskStatus: null,
+    scheduledAt: at(0, 20),
+    completedAt: null,
+    recallResult: null,
+    difficulty: null,
+    nextReviewAt: null,
+    externalTool: '',
+    externalUrl: '',
+    status: ReviewScheduleStatus.DUE,
+  })
+
   const evidenceRepo = await repos.evidences.create({
     title: 'ACO-SAT 复现仓库',
     description: '包含 WalkSAT / ACO 的基础实现、测试与基准脚本。',
@@ -778,8 +831,8 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
   })
 
   await repos.notifications.create({
-    title: '今天有 2 个知识点需要复习',
-    content: '信息素更新与蚁群算法已经到期，建议在今晚 20:00 前完成主动回忆。',
+    title: '今天有 1 个任务需要复习',
+    content: '「阅读 Linux 字符设备驱动框架」已到复习时间，完成后会把任务标记完成。',
     notificationType: NotificationType.REVIEW,
     scheduledAt: at(0, 20),
     status: NotificationStatus.PENDING,

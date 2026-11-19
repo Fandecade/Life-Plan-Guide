@@ -335,6 +335,7 @@ try {
     const days = Array.from(document.querySelectorAll('.week-day'))
     const source = document.querySelector('.week-card')
     const todayIndex = days.findIndex((node) => node.classList.contains('today'))
+    const sourceBefore = days[todayIndex]?.querySelectorAll('.week-card').length ?? 0
     const targetIndex = todayIndex === 6 ? 5 : todayIndex + 1
     const target = days[targetIndex]
     if (!source || !target) throw new Error('周视图拖拽源或目标不存在')
@@ -346,7 +347,7 @@ try {
     target.dispatchEvent(
       new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: transfer }),
     )
-    return { todayIndex, targetIndex }
+    return { todayIndex, targetIndex, sourceBefore }
   })
   await waitText(page, '时间盒日期已调整')
   await delay(300)
@@ -361,7 +362,7 @@ try {
     targetDay,
   )
   assert(moveResult.target >= 1, '时间盒未移动到目标日列')
-  assert(moveResult.source === 0, '时间盒仍留在原日期列')
+  assert(moveResult.source === targetDay.sourceBefore - 1, '时间盒仍留在原日期列')
   pass('拖动时间盒改日期', `第 ${targetDay.todayIndex + 1} 列 → 第 ${targetDay.targetIndex + 1} 列`)
 
   await delay(500)

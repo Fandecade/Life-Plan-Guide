@@ -94,6 +94,27 @@ async function clickCardAction(page, cardSelector, text, label) {
   )
 }
 
+async function checkStageChecklist(page) {
+  const count = await page.$$eval('.stage-checklist .checklist-item', (nodes) => nodes.length)
+  for (let index = 0; index < count; index += 1) {
+    await page.evaluate((target) => {
+      const input = document.querySelectorAll('.stage-checklist .checklist-item input')[target]
+      if (input && !input.checked) input.click()
+    }, index)
+    await delay(150)
+  }
+  await page.waitForFunction(
+    () => {
+      const inputs = Array.from(
+        document.querySelectorAll('.stage-checklist .checklist-item input'),
+      )
+      return inputs.length === 0 || inputs.every((input) => input.checked)
+    },
+    { timeout: 8000 },
+  )
+  return count
+}
+
 const browser = await puppeteer.launch({
   executablePath: CHROME_PATH,
   headless: true,
@@ -131,8 +152,8 @@ try {
   )
   assert(stats[0] === '1', `学习会话应为 1，实际 ${stats[0]}`)
   assert(stats[1] === '45 分钟', `本周学习时长应为 45 分钟，实际 ${stats[1]}`)
-  assert(stats[2] === '3', `知识点应为 3，实际 ${stats[2]}`)
-  assert(stats[3] === '2', `待复习应为 2，实际 ${stats[3]}`)
+  assert(stats[2] === '0', `已完成复习应为 0，实际 ${stats[2]}`)
+  assert(stats[3] === '1', `待复习任务应为 1，实际 ${stats[3]}`)
   await waitText(page, '开始一次学习会话')
   pass('学习概览', stats.join(' / '))
 
@@ -145,12 +166,35 @@ try {
   await waitText(page, '进行中')
   pass('开始学习会话', '任务 + 流程 + 学习意图')
 
-  await clickText(page, '.session-actions button', '下一阶段')
+  const checklistCount = await page.$$eval('.checklist-item', (nodes) => nodes.length)
+  assert(checklistCount >= 3, `预习阶段清单不足：${checklistCount}`)
+  await checkStageChecklist(page)
+  await page.waitForFunction(
+    () =>
+      (document.querySelector('.checklist-progress')?.textContent ?? '').replace(/\s+/g, '') ===
+      '3/3',
+    { timeout: 5000 },
+  )
+  pass('阶段清单可勾选完成', `预习阶段 ${checklistCount} 项`)
+
+  await page.reload({ waitUntil: 'networkidle0' })
+  await page.waitForSelector('.session-shell', { timeout: 15000 })
+  await page.waitForFunction(
+    () =>
+      (document.querySelector('.checklist-progress')?.textContent ?? '').replace(/\s+/g, '') ===
+      '3/3',
+    { timeout: 8000 },
+  )
+  pass('清单进度持久化', '刷新后仍为 3/3')
+
+  await clickText(page, '.session-actions button', '完成本阶段')
   await page.waitForFunction(
     () => (document.querySelector('.stage-card h4')?.textContent ?? '').includes('精读输入'),
     { timeout: 8000 },
   )
-  await clickText(page, '.session-actions button', '下一阶段')
+  const inputChecklistCount = await checkStageChecklist(page)
+  assert(inputChecklistCount >= 3, `精读阶段清单不足：${inputChecklistCount}`)
+  await clickText(page, '.session-actions button', '完成本阶段')
   await page.waitForFunction(
     () => (document.querySelector('.stage-card h4')?.textContent ?? '').includes('白纸输出'),
     { timeout: 8000 },
@@ -172,26 +216,6 @@ try {
   await waitText(page, 'WalkSAT 流程复述')
   pass('保存学习记录', '输出记录带自评')
 
-  await page.evaluate(() => {
-    const labels = Array.from(document.querySelectorAll('.knowledge-link'))
-    const target = labels.find((node) =>
-      (node.textContent ?? '').includes('WalkSAT 变量选择'),
-    )
-    if (!target) throw new Error('未找到知识点关联项')
-    const input = target.querySelector('input[type="checkbox"]')
-    if (!input) throw new Error('知识点关联缺少复选框')
-    input.click()
-  })
-  await delay(400)
-  const linked = await page.$$eval('.knowledge-link', (nodes) =>
-    nodes.some(
-      (node) =>
-        (node.textContent ?? '').includes('WalkSAT 变量选择') &&
-        node.classList.contains('selected'),
-    ),
-  )
-  assert(linked, '知识点关联未保存')
-  pass('关联知识点')
 
   await clickText(page, '.session-actions button', '完成会话')
   await page.waitForSelector('#finish-assessment', { timeout: 8000 })
@@ -207,12 +231,23 @@ try {
 
   const sessionCount = await page.$$eval('.session-list-item', (nodes) => nodes.length)
   assert(sessionCount >= 2, `最近会话应至少有 2 条，实际 ${sessionCount}`)
-  await page.click('.session-list-main')
+  const openedSession = await page.evaluate(() => {
+    const items = Array.from(document.querySelectorAll('.session-list-item'))
+    const target =
+      items.find((node) => {
+        const text = (node.textContent ?? '').trim()
+        return text.includes('独立复述算法流程')
+      }) ?? items[0]
+    const main = target?.querySelector('.session-list-main')
+    if (!main) return false
+    main.click()
+    return true
+  })
+  assert(openedSession, '未找到刚完成的学习会话')
   await page.waitForSelector('.session-detail', { timeout: 8000 })
   await waitText(page, 'WalkSAT 流程复述')
   await waitText(page, '会话反思')
-  await waitText(page, 'WalkSAT 变量选择')
-  pass('会话详情', '记录、反思与知识点可回看')
+  pass('会话详情', '记录与反思可回看')
   await page.click('.modal-head button')
   await waitModalClosed(page)
 
@@ -232,67 +267,131 @@ try {
   await clickCardAction(page, '.workflow-card', '费曼学习 · 解释与重学', '编辑流程')
   await page.waitForSelector('#workflow-name', { timeout: 8000 })
   await setInput(page, '#workflow-name', '费曼学习 · 我的版本')
+  const presetChecklistRows = await page.$$eval('.checklist-editor-row', (nodes) => nodes.length)
+  assert(presetChecklistRows >= 3, `阶段编辑器未加载清单：${presetChecklistRows}`)
+  await clickText(page, '.stage-editor button', '添加一项')
+  await page.waitForFunction(
+    (expected) => document.querySelectorAll('.checklist-editor-row').length === expected,
+    { timeout: 5000 },
+    presetChecklistRows + 1,
+  )
+  await page.evaluate(() => {
+    const inputs = document.querySelectorAll('.checklist-editor-row .input')
+    const input = inputs[inputs.length - 1]
+    const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set
+    setter?.call(input, '写出一个反例')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  pass('阶段清单可维护', `新增 1 项，编辑器共 ${presetChecklistRows + 1} 项`)
   await clickText(page, '.modal-actions button', '保存修改')
   await waitText(page, '学习流程已更新', 15000)
   await waitModalClosed(page)
   await waitText(page, '费曼学习 · 我的版本')
   pass('编辑学习流程')
 
-  await clickText(page, '.view-tab', '知识点')
-  await page.waitForSelector('.knowledge-view', { timeout: 8000 })
-  await clickText(page, '.knowledge-view button', '新建知识点')
-  await page.waitForSelector('#knowledge-title', { timeout: 8000 })
-  await setInput(page, '#knowledge-title', 'SAT 噪声参数')
-  await setInput(page, '#knowledge-desc', '噪声概率调节探索与利用的平衡，不是单纯的随机性。')
-  await setInput(page, '#knowledge-source', 'SAT 局部搜索论文')
-  await setSelect(page, '#knowledge-mastery', 'L2')
-  await clickText(page, '.modal-actions button', '创建知识点')
-  await waitText(page, '知识点已创建', 15000)
+  await clickCardAction(page, '.workflow-card', '费曼学习 · 我的版本', '编辑流程')
+  await page.waitForSelector('#workflow-name', { timeout: 8000 })
+  const persistedChecklist = await page.$$eval('.checklist-editor-row .input', (nodes) =>
+    nodes.map((node) => node.value),
+  )
+  assert(
+    persistedChecklist.includes('写出一个反例'),
+    `流程清单未持久化：${persistedChecklist.join(' | ')}`,
+  )
+  pass('流程清单持久化', '重新打开仍保留新增项')
+  await clickText(page, '.modal-actions button', '取消')
   await waitModalClosed(page)
-  await waitText(page, 'SAT 噪声参数')
-  pass('创建知识点')
-
-  await page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll('.knowledge-row'))
-    const row = rows.find((node) => (node.textContent ?? '').includes('SAT 噪声参数'))
-    if (!row) throw new Error('未找到知识点行')
-    const button = Array.from(row.querySelectorAll('button')).find((node) =>
-      (node.textContent ?? '').includes('安排复习'),
-    )
-    if (!button) throw new Error('知识点行缺少安排复习按钮')
-    button.click()
-  })
-  await page.waitForSelector('#schedule-date', { timeout: 8000 })
-  await setInput(page, '#schedule-date', dateKey(1))
-  await clickText(page, '.modal-actions button', '安排复习')
-  await waitText(page, '复习已安排', 15000)
-  await waitModalClosed(page)
-  pass('安排复习', '知识点进入复习调度')
 
   await clickText(page, '.view-tab', '复习')
-  await page.waitForSelector('.due-card', { timeout: 8000 })
-  await clickText(page, '.due-card button', '开始复习')
-  await page.waitForSelector('#review-recall-draft', { timeout: 8000 })
-  await setInput(
-    page,
-    '#review-recall-draft',
-    'WalkSAT 会从当前未满足的子句中选一个变量，再按噪声概率随机翻转，或以较大概率选择让最多子句得到满足的变量。',
+  await page.waitForSelector('.review-view', { timeout: 8000 })
+  await waitText(page, '任务复习提醒')
+  const reviewRows = await page.$$eval('.review-row .review-name', (nodes) =>
+    nodes.map((node) => (node.textContent ?? '').trim()),
   )
-  await clickText(page, '.modal-actions button, .recall-reveal', '显示参考内容')
-  await page.waitForSelector('#review-recall:not([disabled])', { timeout: 8000 })
-  await setSelect(page, '#review-recall', '4')
-  await setInput(page, '#review-difficulty', '2')
-  await clickText(page, '.modal-actions button', '记录复习结果')
-  await waitText(page, '复习已记录', 20000)
-  await waitModalClosed(page)
-  await waitText(page, '下次复习')
-  pass('完成主动回忆', '按回忆结果生成下次复习日期')
+  assert(
+    reviewRows.some((text) => text.includes('阅读 Linux 字符设备驱动框架')),
+    `待复习任务未显示：${reviewRows.join(' | ')}`,
+  )
+  pass('任务复习提醒', '复习来源为学习完成，展示任务名')
 
-  await delay(300)
-  await clickText(page, '.due-card button', '跳过')
-  await waitText(page, '本次复习已跳过', 15000)
-  await waitText(page, '没有到期的复习')
-  pass('跳过复习', '调度状态与掌握程度分离')
+  await page.evaluate(() => {
+    const row = Array.from(document.querySelectorAll('.review-row')).find((node) =>
+      (node.textContent ?? '').includes('阅读 Linux 字符设备驱动框架'),
+    )
+    const button = Array.from(row?.querySelectorAll('button') ?? []).find((node) =>
+      (node.textContent ?? '').includes('完成复习'),
+    )
+    if (!button) throw new Error('未找到完成复习按钮')
+    button.click()
+  })
+  await waitText(page, '复习已完成，任务已标记完成', 15000)
+  await waitText(page, '任务已标记完成')
+  pass('完成复习并标记任务', '任务进入已完成')
+
+  await clickText(page, '.view-tab', '工作台')
+  const completedOption = await page.$$eval('#start-task option', (nodes) =>
+    nodes.map((node) => (node.textContent ?? '').trim()),
+  )
+  assert(
+    completedOption.some(
+      (text) => text.includes('阅读 Linux 字符设备驱动框架') && text.includes('（已完成）'),
+    ),
+    `已完成任务未出现在学习任务下拉：${completedOption.join(' | ')}`,
+  )
+  pass('已完成任务可再次学习', '学习任务下拉标注（已完成）')
+
+  await clickText(page, 'a.nav-item', '目标与任务')
+  await page.waitForSelector('.goals-tasks', { timeout: 15000 })
+  await clickText(page, '.view-tab', '任务')
+  await page.waitForSelector('.task-row', { timeout: 15000 })
+  const taskDone = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('.task-row.done .task-title')).some((node) =>
+      (node.textContent ?? '').includes('阅读 Linux 字符设备驱动框架'),
+    ),
+  )
+  assert(taskDone, '复习完成后任务未标记完成')
+  pass('复习完成同步任务', '任务已划线')
+
+  await clickText(page, 'a.nav-item', '学习系统')
+  await page.waitForSelector('.learning-stats', { timeout: 15000 })
+  await clickText(page, '.view-tab', '复习')
+  await page.waitForSelector('.review-view', { timeout: 8000 })
+  const reverted = await page.evaluate(() => {
+    const row = Array.from(document.querySelectorAll('.review-row')).find((node) =>
+      (node.textContent ?? '').includes('阅读 Linux 字符设备驱动框架'),
+    )
+    const button = Array.from(row?.querySelectorAll('button') ?? []).find((node) =>
+      (node.textContent ?? '').includes('取消完成'),
+    )
+    if (!button) return false
+    button.click()
+    return true
+  })
+  assert(reverted, '已完成复习缺少取消完成按钮')
+  await waitText(page, '任务已恢复为未完成，复习记录保留', 15000)
+  pass('取消完成', '任务恢复，复习记录保留')
+
+  await clickText(page, 'a.nav-item', '目标与任务')
+  await page.waitForSelector('.goals-tasks', { timeout: 15000 })
+  await clickText(page, '.view-tab', '任务')
+  await page.waitForSelector('.task-row', { timeout: 15000 })
+  const taskRestored = await page.evaluate(() => {
+    const titles = Array.from(document.querySelectorAll('.task-row .task-title')).map((node) =>
+      (node.textContent ?? '').trim(),
+    )
+    const done = Array.from(document.querySelectorAll('.task-row.done .task-title')).map((node) =>
+      (node.textContent ?? '').trim(),
+    )
+    return (
+      titles.some((text) => text.includes('阅读 Linux 字符设备驱动框架')) &&
+      !done.some((text) => text.includes('阅读 Linux 字符设备驱动框架'))
+    )
+  })
+  assert(taskRestored, '取消完成后任务状态未恢复')
+  pass('取消完成同步任务', '任务恢复未完成')
+
+  await clickText(page, 'a.nav-item', '学习系统')
+  await page.waitForSelector('.learning-stats', { timeout: 15000 })
 
   await clickText(page, '.view-tab', '资源与工具')
   await page.waitForSelector('.resource-view', { timeout: 8000 })
@@ -332,8 +431,8 @@ try {
   await waitText(page, '最近学习会话')
   const sessionsAfterReload = await page.$$eval('.session-list-item', (nodes) => nodes.length)
   assert(sessionsAfterReload >= 2, `刷新后会话列表异常：${sessionsAfterReload}`)
-  await clickText(page, '.view-tab', '知识点')
-  await waitText(page, 'SAT 噪声参数')
+  await clickText(page, '.view-tab', '复习')
+  await waitText(page, '任务复习提醒')
   await clickText(page, '.view-tab', '资源与工具')
   await waitText(page, '论文实验清单')
   pass('刷新后持久化')

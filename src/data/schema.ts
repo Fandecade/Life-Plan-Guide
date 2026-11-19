@@ -214,7 +214,8 @@ export const FOREIGN_KEYS: Partial<Record<StoreName, ForeignKeyRule[]>> = {
     { field: 'taskId', target: StoreName.TASKS, nullable: true, label: '关联任务' },
   ],
   reviewSchedules: [
-    { field: 'knowledgeItemId', target: StoreName.KNOWLEDGE_ITEMS, label: '知识点' },
+    { field: 'knowledgeItemId', target: StoreName.KNOWLEDGE_ITEMS, nullable: true, label: '知识点' },
+    { field: 'taskId', target: StoreName.TASKS, nullable: true, label: '复习任务' },
   ],
   directionCompetencies: [
     { field: 'directionId', target: StoreName.DIRECTIONS, label: '发展方向' },

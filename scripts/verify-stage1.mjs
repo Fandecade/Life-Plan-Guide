@@ -97,7 +97,7 @@ try {
   assert(stats[0] === '0', `今日进行中应为 0，实际 ${stats[0]}`)
   assert(stats[1] === '4', `今日任务应为 4，实际 ${stats[1]}`)
   assert(stats[2] === '45 分钟', `今日学习应为 45 分钟，实际 ${stats[2]}`)
-  assert(stats[3] === '2', `待复习应为 2，实际 ${stats[3]}`)
+  assert(stats[3] === '1', `待复习应为 1，实际 ${stats[3]}`)
   pass('首页聚合计算', stats.join(' / '))
 
   const focusTitle = await page.$eval('.hero-focus .focus-title', (node) =>

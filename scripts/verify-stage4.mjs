@@ -169,7 +169,7 @@ try {
   assert(stats[0] === '2', `进行中目标应为 2，实际 ${stats[0]}`)
   assert(stats[1] === '5', `未完成任务应为 5，实际 ${stats[1]}`)
   assert(stats[2] === '4', `今日任务应为 4，实际 ${stats[2]}`)
-  assert(stats[3] === '45 分钟', `本周已安排应为 45 分钟，实际 ${stats[3]}`)
+  assert(stats[3] === '1 小时 15 分钟', `本周已安排应为 1 小时 15 分钟，实际 ${stats[3]}`)
   const goalCards = await page.$$eval('.goal-card', (nodes) => nodes.length)
   assert(goalCards === 2, `目标卡应为 2，实际 ${goalCards}`)
   pass('执行概览', `${stats.join(' / ')}，${goalCards} 个目标`)

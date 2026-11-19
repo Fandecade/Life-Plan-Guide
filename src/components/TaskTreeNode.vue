@@ -8,7 +8,7 @@ import {
   taskTypeLabels,
   type Task,
 } from '@/domain'
-import { formatDuration, relativeDay } from '@/utils/date'
+import { formatDuration, formatShortDate, relativeDay } from '@/utils/date'
 import type { TaskNode } from '@/composables/useGoalsTasks'
 
 defineOptions({ name: 'TaskTreeNode' })
@@ -18,6 +18,7 @@ const props = defineProps<{
   goalTitles: Record<string, string[]>
   predecessorTitles: Record<string, string[]>
   timeboxCounts: Record<string, number>
+  reviewAtByTask: Record<string, string>
 }>()
 
 const emit = defineEmits<{
@@ -39,6 +40,7 @@ const predecessorNames = computed(
   () => props.predecessorTitles[props.node.task.id] ?? [],
 )
 const timeboxCount = computed(() => props.timeboxCounts[props.node.task.id] ?? 0)
+const reviewAt = computed(() => props.reviewAtByTask[props.node.task.id] ?? null)
 const overdue = computed(() => {
   if (isDone.value || isCancelled.value || !props.node.task.dueDate) return false
   return new Date(props.node.task.dueDate).getTime() < Date.now()
@@ -81,6 +83,7 @@ const overdue = computed(() => {
           <span class="badge" :class="`status-${node.task.status.toLowerCase()}`">
             {{ taskStatusLabels[node.task.status] }}
           </span>
+          <span v-if="reviewAt" class="badge badge-amber">复习 {{ formatShortDate(reviewAt) }}</span>
           <span
             v-if="node.task.priority === 'URGENT' || node.task.priority === 'HIGH'"
             class="badge badge-amber"
@@ -177,6 +180,7 @@ const overdue = computed(() => {
         :goal-titles="goalTitles"
         :predecessor-titles="predecessorTitles"
         :timebox-counts="timeboxCounts"
+        :review-at-by-task="reviewAtByTask"
         @edit="emit('edit', $event)"
         @add-child="emit('addChild', $event)"
         @toggle-status="emit('toggleStatus', $event)"

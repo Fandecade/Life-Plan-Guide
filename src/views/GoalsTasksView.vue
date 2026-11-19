@@ -20,6 +20,7 @@ import {
   Importance,
   Priority,
   ProgressMode,
+  ReviewScheduleStatus,
   TaskStatus,
   TaskType,
   Urgency,
@@ -58,6 +59,7 @@ const {
   goals,
   tasks,
   timeboxes,
+  reviewSchedules,
   competencies,
   activeGoals,
   visibleGoals,
@@ -217,6 +219,24 @@ const timeboxCounts = computed<Record<string, number>>(() => {
 })
 
 const taskTree = computed(() => buildTaskTree(goalFilter.value, showCompleted.value))
+
+const reviewAtByTask = computed<Record<string, string>>(() => {
+  const map: Record<string, string> = {}
+  const rows = reviewSchedules.value
+    .filter(
+      (row) =>
+        row.taskId &&
+        (row.status === ReviewScheduleStatus.PENDING ||
+          row.status === ReviewScheduleStatus.DUE),
+    )
+    .sort((left, right) => left.scheduledAt.localeCompare(right.scheduledAt))
+  for (const row of rows) {
+    if (row.taskId && !map[row.taskId]) {
+      map[row.taskId] = row.scheduledAt
+    }
+  }
+  return map
+})
 interface TimeboxGroup {
   key: string
   label: string
@@ -1850,6 +1870,7 @@ onMounted(async () => {
             :goal-titles="goalTitlesByTask"
             :predecessor-titles="predecessorTitlesByTask"
             :timebox-counts="timeboxCounts"
+            :review-at-by-task="reviewAtByTask"
             @edit="openTaskEdit"
             @add-child="openTaskCreate"
             @toggle-status="requestToggleStatus"

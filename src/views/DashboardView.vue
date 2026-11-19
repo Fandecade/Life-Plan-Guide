@@ -51,7 +51,8 @@ const {
   isDatabaseEmpty,
   greeting,
   dateLabel,
-  knowledgeTitle,
+
+  taskTitle,
   refresh,
   setFocusTask,
   setSummaryRange,
@@ -725,19 +726,18 @@ onMounted(() => {
           <EmptyState
             v-if="!loading && dueReviews.length === 0"
             title="没有到期的复习"
-            description="复习到期不代表已经遗忘，只代表建议进行一次主动回忆。"
+            description="复习到期只用于提醒；完成后会把对应任务标记完成。"
           />
           <ul v-else class="review-list">
             <li v-for="item in dueReviews.slice(0, 4)" :key="item.id" class="review-item">
               <span class="review-dot" />
               <button class="review-copy review-open" @click="openReview(item.id)">
-                <span class="task-title">{{ knowledgeTitle(item.knowledgeItemId) }}</span>
+                <span class="task-title">{{ taskTitle(item.taskId ?? null) }}</span>
                 <span class="review-meta">
                   {{ formatShortDate(item.scheduledAt) }} 到期
-                  <span v-if="item.externalTool">· {{ item.externalTool }}</span>
                 </span>
               </button>
-              <button class="review-start" @click="openReview(item.id)">开始回忆</button>
+              <button class="review-start" @click="openReview(item.id)">查看复习</button>
             </li>
           </ul>
         </article>

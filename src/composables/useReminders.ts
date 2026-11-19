@@ -76,6 +76,7 @@ async function refresh(): Promise<void> {
     const deadline = endOfDay().toISOString()
     const dueReviews = reviewSchedules.filter(
       (row) =>
+        row.taskId &&
         (row.status === ReviewScheduleStatus.PENDING ||
           row.status === ReviewScheduleStatus.DUE) &&
         row.scheduledAt <= deadline,
@@ -83,8 +84,8 @@ async function refresh(): Promise<void> {
     if (dueReviews.length > 0) {
       list.push({
         id: 'due-reviews',
-        title: `${dueReviews.length} 个知识点需要复习`,
-        description: '到期不等于遗忘，做一次主动回忆再决定下一次间隔。',
+        title: `${dueReviews.length} 个任务需要复习`,
+        description: '复习到期只用于提醒；完成后会把对应任务标记完成。',
         route: '/learning',
         icon: 'refresh',
         tone: 'amber',

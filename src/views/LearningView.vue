@@ -6,9 +6,7 @@ import EmptyState from '@/components/EmptyState.vue'
 import ModalDialog from '@/components/ModalDialog.vue'
 import { useToast } from '@/composables/useToast'
 import {
-  nextReviewInterval,
   useLearning,
-  type KnowledgeInput,
   type LearningRecordInput,
   type ResourceInput,
   type WorkflowInput,
@@ -16,22 +14,19 @@ import {
 import { WORKFLOW_PRESETS, type WorkflowPreset } from '@/data/learningPresets'
 import {
   LearningRecordType,
-  MasteryLevel,
   ResourceType,
-  ReviewScheduleStatus,
   SessionStatus,
   TaskType,
   learningRecordTypeLabels,
-  masteryLevelLabels,
   resourceTypeLabels,
   reviewScheduleStatusLabels,
   sessionStatusLabels,
   taskTypeLabels,
-  type KnowledgeItem,
   type LearningRecord,
   type LearningSession,
   type Resource,
   type ReviewSchedule,
+  type Task,
   type Workflow,
   type WorkflowStage,
 } from '@/domain'
@@ -44,12 +39,9 @@ const {
   error,
   workflows,
   sessions,
-  knowledgeItems,
-  reviewSchedules,
   resources,
   includeArchived,
   activeWorkflows,
-  activeKnowledge,
   activeResources,
   availableTasks,
   activeSession,
@@ -57,13 +49,10 @@ const {
   activeStage,
   activeStageIndex,
   activeSessionRecords,
-  activeSessionKnowledgeIds,
   elapsedMinutes,
   taskById,
   workflowById,
-  knowledgeById,
   recordsBySession,
-  knowledgeIdsBySession,
   dueReviews,
   upcomingReviews,
   completedReviews,
@@ -75,23 +64,22 @@ const {
   setWorkflowArchived,
   startSession,
   setStage,
+  completeStage,
+  toggleChecklistItem,
   finishSession,
   saveRecord,
-  syncSessionKnowledge,
-  saveKnowledge,
-  setKnowledgeArchived,
-  saveReviewSchedule,
+  saveTaskReview,
   completeReview,
+  revertReview,
   skipReview,
   saveResource,
   setResourceArchived,
 } = useLearning()
 
-type LearningView = 'workbench' | 'workflows' | 'knowledge' | 'reviews' | 'resources'
+type LearningView = 'workbench' | 'workflows' | 'reviews' | 'resources'
 const activeView = ref<LearningView>('workbench')
 
 const recordTypes = Object.values(LearningRecordType)
-const masteryLevels = Object.values(MasteryLevel)
 const resourceTypes = Object.values(ResourceType)
 const taskTypeOptions = Object.values(TaskType)
 
@@ -170,13 +158,81 @@ function workflowName(workflowId: string | null): string {
   return workflowById.value[workflowId]?.name ?? '流程已不存在'
 }
 
+const currentStageIndex = computed(() => {
+  const session = activeSession.value
+  const workflow = activeWorkflow.value
+  if (!session || !workflow) return 0
+  const index = workflow.stages.findIndex((stage) => stage.key === session.currentStage)
+  return index < 0 ? 0 : index
+})
+
+const activeStageCompleted = computed(() => {
+  const session = activeSession.value
+  const stage = activeStage.value
+  if (!session || !stage) return false
+  return (session.completedStages ?? []).includes(stage.key)
+})
+
+const activeChecklistDone = computed(() => {
+  const session = activeSession.value
+  const stage = activeStage.value
+  if (!session || !stage) return []
+  return session.checklistProgress?.[stage.key] ?? []
+})
+
+const activeChecklistComplete = computed(() => {
+  const items = activeStage.value?.checklist ?? []
+  if (items.length === 0) return true
+  return items.every((item) => activeChecklistDone.value.includes(item))
+})
+
+const activeChecklistRemaining = computed(() =>
+  Math.max(0, (activeStage.value?.checklist?.length ?? 0) - activeChecklistDone.value.length),
+)
+
+function checklistItemDone(item: string): boolean {
+  return activeChecklistDone.value.includes(item)
+}
+
+async function toggleChecklist(item: string, event: Event): Promise<void> {
+  const session = activeSession.value
+  const stage = activeStage.value
+  if (!session || !stage) return
+  const checked = (event.target as HTMLInputElement).checked
+  try {
+    await toggleChecklistItem(session.id, stage.key, item, checked)
+  } catch (caught) {
+    toastError(caught instanceof Error ? caught.message : String(caught))
+  }
+}
+
+const isLastStage = computed(() => {
+  const workflow = activeWorkflow.value
+  if (!workflow) return false
+  return activeStageIndex.value >= workflow.stages.length - 1
+})
+
+function stageIsDone(stage: WorkflowStage): boolean {
+  return (activeSession.value?.completedStages ?? []).includes(stage.key)
+}
+
+function stageIsCurrent(index: number): boolean {
+  return index === currentStageIndex.value
+}
+
+function stageIsReachable(index: number): boolean {
+  const workflow = activeWorkflow.value
+  if (!workflow) return false
+  const stage = workflow.stages[index]
+  return Boolean(stage) && (stageIsDone(stage) || index <= currentStageIndex.value)
+}
 
 async function goStage(index: number): Promise<void> {
   const session = activeSession.value
   const workflow = activeWorkflow.value
   if (!session || !workflow) return
   const stage = workflow.stages[index]
-  if (!stage) return
+  if (!stage || !stageIsReachable(index)) return
   try {
     await setStage(session.id, stage.key)
   } catch (caught) {
@@ -184,33 +240,33 @@ async function goStage(index: number): Promise<void> {
   }
 }
 
-async function prevStage(): Promise<void> {
-  if (activeStageIndex.value > 0) await goStage(activeStageIndex.value - 1)
-}
-
-async function nextStage(): Promise<void> {
-  if (!activeWorkflow.value) return
-  if (activeStageIndex.value < activeWorkflow.value.stages.length - 1) {
-    await goStage(activeStageIndex.value + 1)
-  }
-}
-
-function askSkipStage(): void {
-  const stage = activeStage.value
+async function completeCurrentStage(): Promise<void> {
   const session = activeSession.value
-  if (!stage || !session || !activeWorkflow.value) return
-  if (activeStageIndex.value >= activeWorkflow.value.stages.length - 1) {
-    toastError('当前已是最后一个阶段，可以完成或中断会话')
+  const workflow = activeWorkflow.value
+  const stage = activeStage.value
+  if (!session || !workflow || !stage) return
+  if (activeStageCompleted.value) return
+  if (!activeChecklistComplete.value) {
+    toastError('先完成本阶段清单，再进入下一阶段')
     return
   }
-  confirmTarget.value = {
-    kind: 'skip-stage',
-    id: stage.key,
-    label: stage.name,
-    archived: false,
+  const last = activeStageIndex.value >= workflow.stages.length - 1
+  try {
+    await completeStage(session.id, stage.key, last ? null : workflow.stages[activeStageIndex.value + 1]?.key ?? null)
+    if (last) {
+      openFinish()
+    } else {
+      success(`「${stage.name}」已完成`)
+    }
+  } catch (caught) {
+    toastError(caught instanceof Error ? caught.message : String(caught))
   }
-  confirmOpen.value = true
 }
+
+async function returnToCurrentStage(): Promise<void> {
+  await goStage(currentStageIndex.value)
+}
+
 
 function resourceUrl(tool: string | null): string {
   if (!tool) return ''
@@ -324,20 +380,6 @@ async function submitRecord(): Promise<void> {
   }
 }
 
-async function toggleKnowledge(knowledgeId: string, event: Event): Promise<void> {
-  const session = activeSession.value
-  if (!session) return
-  const checked = (event.target as HTMLInputElement).checked
-  const ids = [...activeSessionKnowledgeIds.value]
-  const next = checked
-    ? [...ids, ...(ids.includes(knowledgeId) ? [] : [knowledgeId])]
-    : ids.filter((id) => id !== knowledgeId)
-  try {
-    await syncSessionKnowledge(session.id, next)
-  } catch (caught) {
-    toastError(caught instanceof Error ? caught.message : String(caught))
-  }
-}
 
 const finishOpen = ref(false)
 const finishForm = reactive({ actualAssessment: 2, reflection: '' })
@@ -353,8 +395,7 @@ interface CompletionOutcome {
   assessment: number
   outputs: LearningRecord[]
   issues: LearningRecord[]
-  knowledge: KnowledgeItem[]
-  reviewKnowledge: KnowledgeItem[]
+
   evidence: LearningRecord[]
 }
 
@@ -371,9 +412,7 @@ async function submitFinish(): Promise<void> {
   if (!session) return
   const outcomeTaskTitle = taskTitle(session.taskId)
   const outcomeWorkflowName = workflowName(session.workflowId)
-  const outcomeKnowledge = activeSessionKnowledgeIds.value
-    .map((id) => knowledgeById.value[id])
-    .filter((item): item is KnowledgeItem => Boolean(item))
+
   const outcomeRecords = [...activeSessionRecords.value]
   const outcomeReflection = finishForm.reflection.trim()
   finishing.value = true
@@ -407,14 +446,7 @@ async function submitFinish(): Promise<void> {
           LearningRecordType.REFLECTION,
         ]).has(record.recordType),
       ),
-      knowledge: outcomeKnowledge,
-      reviewKnowledge: outcomeKnowledge.filter((item) =>
-        new Set<MasteryLevel>([
-          MasteryLevel.L0,
-          MasteryLevel.L1,
-          MasteryLevel.L2,
-        ]).has(item.masteryLevel),
-      ),
+
       evidence: outcomeRecords.filter(
         (record) =>
           record.recordType === LearningRecordType.EVIDENCE || Boolean(record.externalUrl),
@@ -452,13 +484,6 @@ const detailRecords = computed(() =>
     : [],
 )
 
-const detailKnowledge = computed(() =>
-  detailSession.value
-    ? (knowledgeIdsBySession.value[detailSession.value.id] ?? [])
-        .map((id) => knowledgeById.value[id])
-        .filter((item): item is KnowledgeItem => Boolean(item))
-    : [],
-)
 
 const workflowForm = reactive({
   name: '',
@@ -484,6 +509,7 @@ function newStage(index: number): WorkflowStage {
     required: true,
     needsRecord: true,
     externalTool: null,
+    checklist: [],
   }
 }
 
@@ -522,7 +548,10 @@ function applyPreset(key: string): void {
     outputRequirements: preset.outputRequirements,
     feedbackRequirements: preset.feedbackRequirements,
     externalTools: preset.externalToolSuggestions.join('、'),
-    stages: preset.stages.map((stage) => ({ ...stage })),
+    stages: preset.stages.map((stage) => ({
+      ...stage,
+      checklist: [...(stage.checklist ?? [])],
+    })),
   })
 }
 
@@ -542,7 +571,10 @@ function openWorkflowEdit(workflow: Workflow): void {
     outputRequirements: workflow.outputRequirements,
     feedbackRequirements: workflow.feedbackRequirements,
     externalTools: workflow.externalToolSuggestions.join('、'),
-    stages: workflow.stages.map((stage) => ({ ...stage })),
+    stages: workflow.stages.map((stage) => ({
+      ...stage,
+      checklist: [...(stage.checklist ?? [])],
+    })),
   })
   presetKey.value = ''
   formError.value = ''
@@ -555,6 +587,17 @@ function addStage(): void {
 
 function removeStage(index: number): void {
   workflowForm.stages.splice(index, 1)
+}
+
+function addChecklistItem(stageIndex: number): void {
+  const stage = workflowForm.stages[stageIndex]
+  if (!stage) return
+  if (!stage.checklist) stage.checklist = []
+  stage.checklist.push('')
+}
+
+function removeChecklistItem(stageIndex: number, itemIndex: number): void {
+  workflowForm.stages[stageIndex]?.checklist?.splice(itemIndex, 1)
 }
 
 function toggleWorkflowTaskType(type: TaskType, event: Event): void {
@@ -594,6 +637,7 @@ async function submitWorkflow(): Promise<void> {
       prompt: stage.prompt.trim(),
       suggestedMinutes: Math.max(0, Number(stage.suggestedMinutes) || 0),
       externalTool: stage.externalTool?.trim() ? stage.externalTool.trim() : null,
+      checklist: (stage.checklist ?? []).map((item) => item.trim()).filter(Boolean),
     }))
     const payload: WorkflowInput = {
       name: workflowForm.name.trim(),
@@ -619,72 +663,10 @@ async function submitWorkflow(): Promise<void> {
   }
 }
 
-const knowledgeForm = reactive({
-  title: '',
-  description: '',
-  source: '',
-  masteryLevel: MasteryLevel.L1,
-  lastReviewedAt: null as string | null,
-})
-const knowledgeEditingId = ref<string | null>(null)
-const knowledgeModalOpen = ref(false)
-
-function openKnowledgeCreate(): void {
-  knowledgeEditingId.value = null
-  Object.assign(knowledgeForm, {
-    title: '',
-    description: '',
-    source: '',
-    masteryLevel: MasteryLevel.L1,
-    lastReviewedAt: null,
-  })
-  formError.value = ''
-  knowledgeModalOpen.value = true
-}
-
-function openKnowledgeEdit(item: KnowledgeItem): void {
-  knowledgeEditingId.value = item.id
-  Object.assign(knowledgeForm, {
-    title: item.title,
-    description: item.description,
-    source: item.source,
-    masteryLevel: item.masteryLevel,
-    lastReviewedAt: item.lastReviewedAt,
-  })
-  formError.value = ''
-  knowledgeModalOpen.value = true
-}
-
-async function submitKnowledge(): Promise<void> {
-  formError.value = ''
-  if (!knowledgeForm.title.trim()) {
-    formError.value = '知识点名称不能为空'
-    return
-  }
-  saving.value = true
-  try {
-    const payload: KnowledgeInput = {
-      title: knowledgeForm.title.trim(),
-      description: knowledgeForm.description.trim(),
-      source: knowledgeForm.source.trim(),
-      masteryLevel: knowledgeForm.masteryLevel,
-      lastReviewedAt: knowledgeForm.lastReviewedAt,
-    }
-    await saveKnowledge(payload, knowledgeEditingId.value ?? undefined)
-    knowledgeModalOpen.value = false
-    success(knowledgeEditingId.value ? '知识点已更新' : '知识点已创建')
-  } catch (caught) {
-    formError.value = caught instanceof Error ? caught.message : String(caught)
-  } finally {
-    saving.value = false
-  }
-}
 
 const scheduleForm = reactive({
-  knowledgeItemId: '',
+  taskId: '',
   scheduledDate: '',
-  externalTool: '',
-  externalUrl: '',
 })
 const scheduleModalOpen = ref(false)
 
@@ -696,19 +678,17 @@ function scheduledAtFromDate(value: string): string {
   return new Date(`${value}T20:00:00`).toISOString()
 }
 
-function openScheduleCreate(knowledge?: KnowledgeItem): void {
-  scheduleForm.knowledgeItemId = knowledge?.id ?? activeKnowledge.value[0]?.id ?? ''
+function openScheduleCreate(task?: Task): void {
+  scheduleForm.taskId = task?.id ?? availableTasks.value[0]?.id ?? ''
   scheduleForm.scheduledDate = tomorrowKey()
-  scheduleForm.externalTool = 'Anki'
-  scheduleForm.externalUrl = ''
   formError.value = ''
   scheduleModalOpen.value = true
 }
 
 async function submitSchedule(): Promise<void> {
   formError.value = ''
-  if (!scheduleForm.knowledgeItemId) {
-    formError.value = '请选择知识点'
+  if (!scheduleForm.taskId) {
+    formError.value = '请选择任务'
     return
   }
   if (!scheduleForm.scheduledDate) {
@@ -717,19 +697,9 @@ async function submitSchedule(): Promise<void> {
   }
   saving.value = true
   try {
-    await saveReviewSchedule({
-      knowledgeItemId: scheduleForm.knowledgeItemId,
-      scheduledAt: scheduledAtFromDate(scheduleForm.scheduledDate),
-      completedAt: null,
-      recallResult: null,
-      difficulty: null,
-      nextReviewAt: null,
-      externalTool: scheduleForm.externalTool.trim(),
-      externalUrl: scheduleForm.externalUrl.trim(),
-      status: ReviewScheduleStatus.PENDING,
-    })
+    await saveTaskReview(scheduleForm.taskId, scheduledAtFromDate(scheduleForm.scheduledDate))
     scheduleModalOpen.value = false
-    success('复习已安排')
+    success('复习提醒已安排，时间盒已同步')
   } catch (caught) {
     formError.value = caught instanceof Error ? caught.message : String(caught)
   } finally {
@@ -737,59 +707,28 @@ async function submitSchedule(): Promise<void> {
   }
 }
 
-const reviewTarget = ref<ReviewSchedule | null>(null)
-const reviewModalOpen = ref(false)
-const reviewForm = reactive({ recall: 2, difficulty: 2 })
-const recallDraft = ref('')
-const recallRevealed = ref(false)
-const reviewing = ref(false)
-
-const reviewKnowledgeItem = computed(() =>
-  reviewTarget.value ? knowledgeById.value[reviewTarget.value.knowledgeItemId] ?? null : null,
-)
-
-function openReview(schedule: ReviewSchedule): void {
-  reviewTarget.value = schedule
-  reviewForm.recall = 2
-  reviewForm.difficulty = 2
-  recallDraft.value = ''
-  recallRevealed.value = false
-  formError.value = ''
-  reviewModalOpen.value = true
-}
-
-function revealRecallReference(): void {
-  recallRevealed.value = true
-}
-
-const nextReviewPreview = computed(() => {
-  const days = nextReviewInterval(reviewForm.recall)
-  return formatShortDate(addDays(nowIso(), days))
-})
-
-async function submitReview(): Promise<void> {
-  const target = reviewTarget.value
-  if (!target) return
-  if (!recallRevealed.value) {
-    toastError('请先完成主动回忆并显示参考内容，再记录结果')
-    return
-  }
-  reviewing.value = true
+async function handleCompleteReview(schedule: ReviewSchedule): Promise<void> {
   try {
-    const next = await completeReview(target, reviewForm.recall, reviewForm.difficulty)
-    reviewModalOpen.value = false
-    success(`复习已记录，下次复习：${formatShortDate(next.toISOString())}`)
+    await completeReview(schedule)
+    success('复习已完成，任务已标记完成')
   } catch (caught) {
     toastError(caught instanceof Error ? caught.message : String(caught))
-  } finally {
-    reviewing.value = false
+  }
+}
+
+async function handleRevertReview(schedule: ReviewSchedule): Promise<void> {
+  try {
+    await revertReview(schedule)
+    success('任务已恢复为未完成，复习记录保留')
+  } catch (caught) {
+    toastError(caught instanceof Error ? caught.message : String(caught))
   }
 }
 
 async function handleSkipReview(schedule: ReviewSchedule): Promise<void> {
   try {
     await skipReview(schedule.id)
-    success('本次复习已跳过，知识点本身不会改变掌握等级')
+    success('复习提醒已取消，对应时间盒已移除')
   } catch (caught) {
     toastError(caught instanceof Error ? caught.message : String(caught))
   }
@@ -859,7 +798,7 @@ async function submitResource(): Promise<void> {
 const confirmOpen = ref(false)
 const confirmBusy = ref(false)
 const confirmTarget = ref<{
-  kind: 'workflow' | 'knowledge' | 'resource' | 'interrupt' | 'skip-stage'
+  kind: 'workflow' | 'resource' | 'interrupt'
   id: string
   label: string
   archived: boolean
@@ -869,7 +808,6 @@ const confirmTitle = computed(() => {
   const target = confirmTarget.value
   if (!target) return ''
   if (target.kind === 'interrupt') return '中断学习会话'
-  if (target.kind === 'skip-stage') return '跳过当前阶段'
   return target.archived ? '恢复内容' : '归档内容'
 })
 
@@ -879,9 +817,6 @@ const confirmText = computed(() => {
   if (target.kind === 'interrupt') {
     return `将中断当前学习会话「${target.label}」。已记录的内容会保留，会话时长会按实际时间记录。`
   }
-  if (target.kind === 'skip-stage') {
-    return `将跳过「${target.label}」。已记录的内容不会删除，之后仍可从阶段进度返回该阶段。`
-  }
   if (target.archived) return `将恢复「${target.label}」，它会重新出现在默认列表中。`
   return `将归档「${target.label}」。不会删除历史记录，归档后可以随时恢复。`
 })
@@ -890,12 +825,11 @@ const confirmActionLabel = computed(() => {
   const target = confirmTarget.value
   if (!target) return ''
   if (target.kind === 'interrupt') return '确认中断'
-  if (target.kind === 'skip-stage') return '确认跳过'
   return target.archived ? '确认恢复' : '确认归档'
 })
 
 function askArchive(
-  kind: 'workflow' | 'knowledge' | 'resource',
+  kind: 'workflow' | 'resource',
   id: string,
   label: string,
   archivedAt: string | null,
@@ -918,15 +852,11 @@ async function runConfirm(): Promise<void> {
       stopClock()
       initStartDefaults()
       success('学习会话已中断，记录已保留')
-    } else if (target.kind === 'skip-stage') {
-      await nextStage()
-      success(`已跳过「${target.label}」，可以继续当前阶段`)
+
     } else if (target.kind === 'workflow') {
       await setWorkflowArchived(target.id, !target.archived)
       success(target.archived ? '已恢复' : '已归档，可随时恢复')
-    } else if (target.kind === 'knowledge') {
-      await setKnowledgeArchived(target.id, !target.archived)
-      success(target.archived ? '已恢复' : '已归档，可随时恢复')
+
     } else {
       await setResourceArchived(target.id, !target.archived)
       success(target.archived ? '已恢复' : '已归档，可随时恢复')
@@ -943,9 +873,6 @@ const visibleWorkflows = computed(() =>
   workflows.value.filter((workflow) => includeArchived.value || !workflow.archivedAt),
 )
 
-const visibleKnowledge = computed(() =>
-  knowledgeItems.value.filter((item) => includeArchived.value || !item.archivedAt),
-)
 
 const visibleResources = computed(() =>
   resources.value.filter((item) => includeArchived.value || !item.archivedAt),
@@ -959,13 +886,6 @@ function predictionLabel(value: number): string {
   return predictionOptions.find((option) => option.value === value)?.label ?? `${value}`
 }
 
-function masteryClass(level: MasteryLevel): string {
-  return `mastery-${level.toLowerCase()}`
-}
-
-function knowledgeTitle(id: string): string {
-  return knowledgeById.value[id]?.title ?? '未知知识点'
-}
 
 function recordUrl(url: string): string {
   return url
@@ -984,13 +904,7 @@ onMounted(async () => {
   await bootstrap()
   const reviewParam = String(route.query.review ?? '')
   if (reviewParam) {
-    const schedule = reviewSchedules.value.find((item) => item.id === reviewParam)
-    if (schedule) {
-      activeView.value = 'knowledge'
-      openReview(schedule)
-    } else {
-      toastError('这条复习记录不存在或已经失效')
-    }
+    activeView.value = 'reviews'
     await router.replace('/learning')
   }
   const taskParam = String(route.query.task ?? '')
@@ -1004,11 +918,7 @@ onMounted(async () => {
     }
     await router.replace('/learning')
   }
-  if (String(route.query.create ?? '') === 'knowledge') {
-    activeView.value = 'knowledge'
-    openKnowledgeCreate()
-    await router.replace('/learning')
-  }
+
 })
 
 onUnmounted(() => {
@@ -1023,7 +933,7 @@ onUnmounted(() => {
         <p class="page-eyebrow">执行与学习 · 学习工作台</p>
         <h2 class="page-title">学习系统</h2>
         <p class="page-subtitle">
-          不只记录学习时长。用可配置流程推动输入、输出、反馈与反思，把成果和知识点留下来，并安排下一轮学习。
+          不只记录学习时长。用可配置流程推动输入、输出、反馈与反思，完成后自动生成任务复习提醒。
         </p>
       </div>
       <div class="header-actions">
@@ -1031,9 +941,9 @@ onUnmounted(() => {
           <AppIcon name="layers" :size="15" />
           新建学习流程
         </button>
-        <button class="btn btn-primary" @click="activeView = 'knowledge'; openKnowledgeCreate()">
-          <AppIcon name="bulb" :size="15" />
-          记录知识点
+        <button class="btn btn-primary" @click="activeView = 'reviews'; openScheduleCreate()">
+          <AppIcon name="refresh" :size="15" />
+          安排复习
         </button>
       </div>
     </header>
@@ -1060,10 +970,10 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="learning-stat">
-        <span class="stat-icon icon-amber"><AppIcon name="bulb" :size="16" /></span>
+        <span class="stat-icon icon-amber"><AppIcon name="check" :size="16" /></span>
         <div>
-          <span class="stat-number">{{ stats.knowledge }}</span>
-          <span class="stat-caption">知识点</span>
+          <span class="stat-number">{{ completedReviews.length }}</span>
+          <span class="stat-caption">已完成复习</span>
         </div>
       </div>
       <div class="learning-stat">
@@ -1081,7 +991,7 @@ onUnmounted(() => {
           v-for="tab in [
             { key: 'workbench', label: '工作台', icon: 'play' },
             { key: 'workflows', label: '学习流程', icon: 'layers' },
-            { key: 'knowledge', label: '知识点', icon: 'bulb' },
+
             { key: 'reviews', label: '复习', icon: 'refresh' },
             { key: 'resources', label: '资源与工具', icon: 'book' },
           ] as const"
@@ -1095,7 +1005,7 @@ onUnmounted(() => {
           <AppIcon :name="tab.icon" :size="15" />
           {{ tab.label }}
           <span v-if="tab.key === 'workflows'" class="tab-count">{{ visibleWorkflows.length }}</span>
-          <span v-else-if="tab.key === 'knowledge'" class="tab-count">{{ visibleKnowledge.length }}</span>
+
           <span v-else-if="tab.key === 'reviews'" class="tab-count">{{ dueReviews.length }}</span>
           <span v-else-if="tab.key === 'resources'" class="tab-count">{{ visibleResources.length }}</span>
         </button>
@@ -1140,64 +1050,37 @@ onUnmounted(() => {
             </div>
           </header>
 
-          <div class="session-grid">
-            <aside class="session-rail" aria-label="学习流程与会话信息">
-              <section class="rail-block">
-                <div class="rail-heading">
-                  <span>学习流程</span>
-                  <span class="rail-count">{{ activeWorkflow?.stages.length ?? 0 }} 阶段</span>
-                </div>
-                <div v-if="activeWorkflow" class="stage-progress stage-progress-rail">
-                  <button
-                    v-for="(stage, index) in activeWorkflow.stages"
-                    :key="stage.key"
-                    class="stage-step"
-                    :class="{
-                      active: index === activeStageIndex,
-                      passed: index < activeStageIndex,
-                    }"
-                    :aria-current="index === activeStageIndex ? 'step' : undefined"
-                    @click="goStage(index)"
-                  >
-                    <span class="stage-index">{{ index + 1 }}</span>
-                    <span class="stage-name">{{ stage.name }}</span>
-                  </button>
-                </div>
-                <p v-else class="rail-empty">当前流程没有阶段。</p>
-              </section>
+          <nav class="flow-track" aria-label="学习流程">
+            <ol>
+              <li
+                v-for="(stage, index) in activeWorkflow?.stages ?? []"
+                :key="stage.key"
+                :class="{
+                  done: stageIsDone(stage),
+                  current: stageIsCurrent(index),
+                  locked: !stageIsReachable(index),
+                }"
+              >
+                <button
+                  type="button"
+                  :disabled="!stageIsReachable(index)"
+                  :aria-current="stageIsCurrent(index) ? 'step' : undefined"
+                  @click="goStage(index)"
+                >
+                  <span class="flow-dot">
+                    <AppIcon v-if="stageIsDone(stage)" name="check" :size="12" />
+                    <span v-else>{{ index + 1 }}</span>
+                  </span>
+                  <span class="flow-copy">
+                    <span class="flow-name">{{ stage.name }}</span>
+                    <span class="flow-meta">{{ stage.suggestedMinutes }} 分钟</span>
+                  </span>
+                </button>
+              </li>
+            </ol>
+          </nav>
 
-              <section class="rail-block">
-                <div class="rail-heading"><span>Session 信息</span></div>
-                <dl class="session-facts">
-                  <div>
-                    <dt>开始时间</dt>
-                    <dd>{{ formatDateTime(activeSession.startedAt) }}</dd>
-                  </div>
-                  <div>
-                    <dt>已用时间</dt>
-                    <dd class="fact-accent">{{ formatDuration(elapsedMinutes) }}</dd>
-                  </div>
-                  <div>
-                    <dt>学习前自评</dt>
-                    <dd>{{ predictionLabel(activeSession.selfPrediction) }}</dd>
-                  </div>
-                </dl>
-              </section>
-
-              <section class="rail-block">
-                <div class="rail-heading"><span>当前学习任务</span></div>
-                <p class="rail-task">{{ taskTitle(activeSession.taskId) }}</p>
-                <p v-if="activeSession.taskId && taskById[activeSession.taskId]" class="rail-meta">
-                  预计 {{ formatDuration(taskById[activeSession.taskId].estimatedDuration) }} ·
-                  已完成 {{ formatDuration(taskById[activeSession.taskId].actualDuration) }}
-                </p>
-                <p class="rail-prompt">
-                  {{ activeSession.learningIntention || '还没有写下本次学习意图。' }}
-                </p>
-              </section>
-            </aside>
-
-            <div class="session-main">
+          <div class="session-main">
               <div v-if="activeStage" class="stage-card">
                 <div class="stage-card-head">
                   <div>
@@ -1213,7 +1096,26 @@ onUnmounted(() => {
                   </span>
                 </div>
                 <p class="stage-goal">{{ activeStage.goal }}</p>
-                <p class="stage-prompt">{{ activeStage.prompt }}</p>
+                <div v-if="activeStage.checklist?.length" class="stage-checklist-head">
+                  <span>本阶段要完成</span>
+                  <span class="checklist-progress">
+                    {{ activeChecklistDone.length }}/{{ activeStage.checklist.length }}
+                  </span>
+                </div>
+                <ul v-if="activeStage.checklist?.length" class="stage-checklist">
+                  <li v-for="(item, itemIndex) in activeStage.checklist" :key="itemIndex">
+                    <label class="checklist-item" :class="{ done: checklistItemDone(item) }">
+                      <input
+                        type="checkbox"
+                        :checked="checklistItemDone(item)"
+                        @change="toggleChecklist(item, $event)"
+                      />
+                      <span class="checklist-index">{{ itemIndex + 1 }}</span>
+                      <span class="checklist-text">{{ item }}</span>
+                    </label>
+                  </li>
+                </ul>
+                <p v-if="!activeStage.checklist?.length" class="stage-prompt">{{ activeStage.prompt }}</p>
                 <div class="stage-tools">
                   <span v-if="activeStage.externalTool" class="badge">
                     <AppIcon name="external" :size="11" />
@@ -1240,32 +1142,35 @@ onUnmounted(() => {
               </div>
 
               <div class="session-actions">
-                <button class="btn btn-secondary" :disabled="activeStageIndex === 0" @click="prevStage">
-                  <AppIcon name="arrow-right" :size="14" class="flip" />
-                  上一阶段
-                </button>
-                <button
-                  class="btn btn-secondary"
-                  :disabled="!activeWorkflow || activeStageIndex >= activeWorkflow.stages.length - 1"
-                  @click="nextStage"
-                >
-                  下一阶段
-                  <AppIcon name="arrow-right" :size="14" />
-                </button>
-                <button
-                  class="btn btn-ghost"
-                  :disabled="!activeWorkflow || activeStageIndex >= activeWorkflow.stages.length - 1"
-                  @click="askSkipStage"
-                >
-                  跳过当前阶段
-                </button>
                 <button class="btn btn-primary" @click="openRecordCreate">
                   <AppIcon name="plus" :size="14" />
                   添加本阶段记录
                 </button>
-                <button class="btn btn-ghost" @click="openFinish">
+                <button
+                  v-if="!activeStageCompleted"
+                  class="btn btn-secondary"
+                  :disabled="!activeChecklistComplete"
+                  @click="completeCurrentStage"
+                >
                   <AppIcon name="check" :size="14" />
-                  完成会话
+                  {{ isLastStage ? '完成会话' : '完成本阶段' }}
+                </button>
+                <span
+                  v-if="activeChecklistRemaining > 0"
+                  class="session-actions-hint"
+                >
+                  还有 {{ activeChecklistRemaining }} 项未完成
+                </span>
+                <button v-if="activeStageCompleted" class="btn btn-secondary" @click="returnToCurrentStage">
+                  <AppIcon name="arrow-right" :size="14" />
+                  回到当前阶段
+                </button>
+                <button
+                  v-if="!isLastStage && !activeStageCompleted"
+                  class="btn btn-ghost"
+                  @click="openFinish"
+                >
+                  提前完成会话
                 </button>
                 <button class="btn btn-ghost session-interrupt" @click="openInterrupt">
                   中断
@@ -1306,41 +1211,16 @@ onUnmounted(() => {
                   </a>
                 </article>
               </div>
-            </div>
 
-            <aside class="session-side" aria-label="关联知识与历史记录">
-              <div class="side-block">
-                <h4 class="side-title">
-                  <AppIcon name="bulb" :size="14" />
-                  关联知识点
-                </h4>
-                <p class="side-hint">关联后才能进入复习调度；复习到期不等于已经遗忘。</p>
-                <div v-if="activeKnowledge.length === 0" class="record-empty">
-                  还没有知识点，可以在知识点页创建。
-                </div>
-                <div v-else class="knowledge-link-list">
-                  <label
-                    v-for="item in activeKnowledge"
-                    :key="item.id"
-                    class="knowledge-link"
-                    :class="{ selected: activeSessionKnowledgeIds.includes(item.id) }"
-                  >
-                    <input
-                      type="checkbox"
-                      :checked="activeSessionKnowledgeIds.includes(item.id)"
-                      @change="toggleKnowledge(item.id, $event)"
-                    />
-                    <span>{{ item.title }}</span>
-                    <span class="knowledge-link-level">{{ item.masteryLevel }}</span>
-                  </label>
-                </div>
-              </div>
 
-              <div class="side-block">
-                <h4 class="side-title">
+            <div class="session-aux">
+
+              <details class="aux-block">
+                <summary>
                   <AppIcon name="book" :size="14" />
                   资料与工具
-                </h4>
+                  <span class="aux-count">{{ activeResources.length }}</span>
+                </summary>
                 <div v-if="activeResources.length === 0" class="record-empty">
                   还没有登记资源，可以在“资源与工具”中添加。
                 </div>
@@ -1354,29 +1234,8 @@ onUnmounted(() => {
                     <small>{{ resourceTypeLabels[item.resourceType] }}</small>
                   </li>
                 </ul>
-              </div>
-
-              <div class="side-block">
-                <h4 class="side-title">
-                  <AppIcon name="clock" :size="14" />
-                  最近学习记录
-                </h4>
-                <div v-if="recentSessions.filter((row) => row.id !== activeSession?.id).length === 0" class="record-empty">
-                  完成更多会话后，这里会显示最近记录。
-                </div>
-                <ul v-else class="side-session-list">
-                  <li
-                    v-for="row in recentSessions.filter((session) => session.id !== activeSession?.id).slice(0, 4)"
-                    :key="row.id"
-                  >
-                    <button @click="openSessionDetail(row)">
-                      <span>{{ taskTitle(row.taskId) }}</span>
-                      <small>{{ formatShortDate(row.startedAt) }} · {{ formatDuration(row.actualDuration) }}</small>
-                    </button>
-                  </li>
-                </ul>
-              </div>
-            </aside>
+              </details>
+            </div>
           </div>
         </article>
 
@@ -1431,25 +1290,7 @@ onUnmounted(() => {
               <p v-else class="outcome-empty">本次没有记录问题或反思。</p>
             </section>
             <section>
-              <h4>关联知识点</h4>
-              <div v-if="completionOutcome.knowledge.length" class="outcome-tags">
-                <span v-for="item in completionOutcome.knowledge" :key="item.id">
-                  <span class="level-pill">{{ item.masteryLevel }}</span>{{ item.title }}
-                </span>
-              </div>
-              <p v-else class="outcome-empty">本次没有关联知识点。</p>
-            </section>
-            <section>
-              <h4>待复习知识点</h4>
-              <div v-if="completionOutcome.reviewKnowledge.length" class="outcome-tags">
-                <span v-for="item in completionOutcome.reviewKnowledge" :key="item.id">
-                  <span class="level-pill">{{ item.masteryLevel }}</span>{{ item.title }}
-                </span>
-              </div>
-              <p v-else-if="completionOutcome.knowledge.length" class="outcome-empty">关联知识点均已达到 L3 以上，可继续安排间隔复习。</p>
-              <p v-else class="outcome-empty">本次没有待复习知识点。</p>
-            </section>
-            <section>
+
               <h4>能力证据</h4>
               <div v-if="completionOutcome.evidence.length" class="outcome-list">
                 <article v-for="record in completionOutcome.evidence" :key="record.id">
@@ -1496,7 +1337,7 @@ onUnmounted(() => {
                 <label class="field-label" for="start-task">学习任务</label>
                 <select id="start-task" v-model="startTaskId" class="select">
                   <option v-for="task in availableTasks" :key="task.id" :value="task.id">
-                    {{ task.title }}
+                    {{ task.title }}{{ task.status === 'COMPLETED' ? '（已完成）' : '' }}
                   </option>
                 </select>
               </div>
@@ -1653,83 +1494,15 @@ onUnmounted(() => {
         </div>
       </section>
 
-      <section v-else-if="activeView === 'knowledge'" class="card card-pad knowledge-view">
-        <div class="section-head">
-          <div>
-            <h3 class="section-title">
-              <AppIcon name="bulb" :size="16" />
-              知识点
-            </h3>
-            <p class="section-note">掌握程度与复习状态分开：复习到期不等于已经遗忘。</p>
-          </div>
-          <button class="btn btn-sm btn-secondary" @click="openKnowledgeCreate">
-            <AppIcon name="plus" :size="14" />
-            新建知识点
-          </button>
-        </div>
-
-        <EmptyState
-          v-if="visibleKnowledge.length === 0"
-          title="还没有知识点"
-          description="知识点来自学习输出。不要为每一次阅读创建闪卡，只保留值得反复回忆的内容。"
-        >
-          <button class="btn btn-sm btn-secondary" @click="openKnowledgeCreate">创建知识点</button>
-        </EmptyState>
-
-        <ul v-else class="knowledge-list">
-          <li v-for="item in visibleKnowledge" :key="item.id" class="knowledge-row">
-            <div class="knowledge-level" :class="masteryClass(item.masteryLevel)">
-              {{ item.masteryLevel }}
-            </div>
-            <div class="knowledge-main">
-              <div class="knowledge-head">
-                <span class="knowledge-name">{{ item.title }}</span>
-                <span class="badge">{{ masteryLevelLabels[item.masteryLevel] }}</span>
-                <span v-if="item.archivedAt" class="badge badge-amber">已归档</span>
-              </div>
-              <p class="knowledge-desc">{{ item.description || '还没有补充说明。' }}</p>
-              <div class="knowledge-meta">
-                <span v-if="item.source">来源：{{ item.source }}</span>
-                <span>上次复习：{{ item.lastReviewedAt ? relativeDay(item.lastReviewedAt) : '尚未复习' }}</span>
-              </div>
-            </div>
-            <div class="knowledge-actions">
-              <button
-                class="btn btn-sm btn-secondary"
-                @click="openScheduleCreate(item)"
-              >
-                安排复习
-              </button>
-              <button
-                v-if="!item.archivedAt"
-                class="icon-btn"
-                title="编辑知识点"
-                aria-label="编辑知识点"
-                @click="openKnowledgeEdit(item)"
-              >
-                <AppIcon name="sliders" :size="14" />
-              </button>
-              <button
-                class="icon-btn"
-                :title="item.archivedAt ? '恢复知识点' : '归档知识点'"
-                :aria-label="item.archivedAt ? '恢复知识点' : '归档知识点'"
-                @click="askArchive('knowledge', item.id, item.title, item.archivedAt)"
-              >
-                <AppIcon :name="item.archivedAt ? 'archive' : 'trash'" :size="14" />
-              </button>
-            </div>
-          </li>
-        </ul>
-      </section>
 
       <section v-else-if="activeView === 'reviews'" class="review-view">
         <div class="section-head">
           <div>
             <h3 class="section-title">
               <AppIcon name="refresh" :size="16" />
-              间隔复习
+              任务复习提醒
             </h3>
-            <p class="section-note">主动回忆后记录表现，再决定下一次复习日期。默认间隔会随回忆结果调整。</p>
+            <p class="section-note">每次完成学习会自动生成一次提醒；到期只用于提醒，完成复习会把对应任务标记完成。</p>
           </div>
           <button class="btn btn-sm btn-secondary" @click="openScheduleCreate()">
             <AppIcon name="plus" :size="14" />
@@ -1748,30 +1521,20 @@ onUnmounted(() => {
           <EmptyState
             v-if="dueReviews.length === 0"
             title="没有到期的复习"
-            description="复习到期只表示建议做一次主动回忆，不代表知识点已经遗忘。"
+            description="完成一次学习后，会自动为对应任务生成复习提醒。"
           />
           <ul v-else class="review-list">
             <li v-for="row in dueReviews" :key="row.id" class="review-row">
               <div class="review-main">
-                <span class="review-name">{{ knowledgeTitle(row.knowledgeItemId) }}</span>
+                <span class="review-name">{{ taskTitle(row.taskId ?? null) }}</span>
                 <div class="review-meta">
                   <span>{{ formatShortDate(row.scheduledAt) }} 到期（{{ relativeDay(row.scheduledAt) }}）</span>
-                  <span v-if="row.externalTool">外部工具：{{ row.externalTool }}</span>
+                  <span>完成后会把任务标记为完成</span>
                 </div>
               </div>
               <div class="review-actions">
-                <a
-                  v-if="row.externalUrl"
-                  :href="row.externalUrl"
-                  class="btn btn-sm btn-ghost"
-                  target="_blank"
-                  rel="noopener"
-                >
-                  打开工具
-                  <AppIcon name="external" :size="12" />
-                </a>
-                <button class="btn btn-sm btn-secondary" @click="handleSkipReview(row)">跳过</button>
-                <button class="btn btn-sm btn-primary" @click="openReview(row)">开始复习</button>
+                <button class="btn btn-sm btn-ghost" @click="handleSkipReview(row)">取消提醒</button>
+                <button class="btn btn-sm btn-primary" @click="handleCompleteReview(row)">完成复习</button>
               </div>
             </li>
           </ul>
@@ -1788,18 +1551,20 @@ onUnmounted(() => {
           <EmptyState
             v-if="upcomingReviews.length === 0"
             title="没有后续复习安排"
-            description="可以为知识点安排复习，或在会话中关联知识点后创建。"
+            description="完成学习会自动生成提醒，也可以手动给任务安排一次。"
           />
           <ul v-else class="review-list compact">
             <li v-for="row in upcomingReviews.slice(0, 6)" :key="row.id" class="review-row">
               <div class="review-main">
-                <span class="review-name">{{ knowledgeTitle(row.knowledgeItemId) }}</span>
+                <span class="review-name">{{ taskTitle(row.taskId ?? null) }}</span>
                 <div class="review-meta">
                   <span>{{ formatDate(row.scheduledAt) }}（{{ relativeDay(row.scheduledAt) }}）</span>
-                  <span v-if="row.externalTool">{{ row.externalTool }}</span>
                 </div>
               </div>
-              <span class="badge">{{ reviewScheduleStatusLabels[row.status] }}</span>
+              <div class="review-actions">
+                <button class="btn btn-sm btn-ghost" @click="handleSkipReview(row)">取消</button>
+                <span class="badge">{{ reviewScheduleStatusLabels[row.status] }}</span>
+              </div>
             </li>
           </ul>
         </article>
@@ -1811,18 +1576,20 @@ onUnmounted(() => {
               已完成复习
             </h4>
           </div>
-          <EmptyState v-if="completedReviews.length === 0" title="还没有复习记录" description="完成一次复习后，这里会保留历史表现。" />
+          <EmptyState v-if="completedReviews.length === 0" title="还没有复习记录" description="完成复习后，这里会保留任务与完成时间。" />
           <ul v-else class="review-list compact">
             <li v-for="row in completedReviews.slice(0, 8)" :key="row.id" class="review-row">
               <div class="review-main">
-                <span class="review-name">{{ knowledgeTitle(row.knowledgeItemId) }}</span>
+                <span class="review-name">{{ taskTitle(row.taskId ?? null) }}</span>
                 <div class="review-meta">
                   <span>{{ formatDateTime(row.completedAt) }}</span>
-                  <span>回忆 {{ row.recallResult }}/4 · 难度 {{ row.difficulty }}/5</span>
-                  <span v-if="row.nextReviewAt">下次 {{ formatShortDate(row.nextReviewAt) }}</span>
+                  <span>任务已标记完成</span>
                 </div>
               </div>
-              <span class="badge badge-accent">完成</span>
+              <div class="review-actions">
+                <button class="btn btn-sm btn-ghost" @click="handleRevertReview(row)">取消完成</button>
+                <span class="badge badge-accent">完成</span>
+              </div>
             </li>
           </ul>
         </article>
@@ -2046,6 +1813,38 @@ onUnmounted(() => {
                 <span class="field-label">阶段提示</span>
                 <textarea v-model="stage.prompt" class="textarea" placeholder="告诉学习者具体做什么，例如“关闭论文，用自己的语言写出算法流程”。" />
               </div>
+              <div class="field">
+                <div class="checklist-editor-head">
+                  <span class="field-label">需要完成的清单（可选）</span>
+                  <button type="button" class="btn btn-sm btn-ghost" @click="addChecklistItem(index)">
+                    <AppIcon name="plus" :size="12" />
+                    添加一项
+                  </button>
+                </div>
+                <div v-if="stage.checklist?.length" class="checklist-editor">
+                  <div
+                    v-for="(item, itemIndex) in stage.checklist"
+                    :key="`${itemIndex}-${item}`"
+                    class="checklist-editor-row"
+                  >
+                    <input
+                      v-model="stage.checklist[itemIndex]"
+                      class="input"
+                      placeholder="例如：写下论文要解决的问题"
+                    />
+                    <button
+                      type="button"
+                      class="icon-btn"
+                      title="删除清单项"
+                      aria-label="删除清单项"
+                      @click="removeChecklistItem(index, itemIndex)"
+                    >
+                      <AppIcon name="close" :size="13" />
+                    </button>
+                  </div>
+                </div>
+                <p v-else class="field-hint">不填清单时，这个阶段只显示上面的提示语。</p>
+              </div>
               <div class="stage-editor-foot">
                 <input v-model="stage.externalTool" class="input stage-tool-input" placeholder="外部工具（可选）" />
                 <label class="inline-check">
@@ -2071,49 +1870,15 @@ onUnmounted(() => {
       </form>
     </ModalDialog>
 
-    <ModalDialog :open="knowledgeModalOpen" :title="knowledgeEditingId ? '编辑知识点' : '新建知识点'" subtitle="知识点是值得复习的最小单位。不要把所有句子都变成闪卡。" @close="knowledgeModalOpen = false">
-      <form class="form" @submit.prevent="submitKnowledge">
-        <div class="field">
-          <label class="field-label" for="knowledge-title">名称</label>
-          <input id="knowledge-title" v-model="knowledgeForm.title" class="input" placeholder="例如：WalkSAT 变量选择" />
-        </div>
-        <div class="field">
-          <label class="field-label" for="knowledge-desc">说明</label>
-          <textarea id="knowledge-desc" v-model="knowledgeForm.description" class="textarea" />
-        </div>
-        <div class="form-grid">
-          <div class="field">
-            <label class="field-label" for="knowledge-source">来源</label>
-            <input id="knowledge-source" v-model="knowledgeForm.source" class="input" placeholder="论文、课程、项目" />
-          </div>
-          <div class="field">
-            <label class="field-label" for="knowledge-mastery">掌握程度</label>
-            <select id="knowledge-mastery" v-model="knowledgeForm.masteryLevel" class="select">
-              <option v-for="level in masteryLevels" :key="level" :value="level">
-                {{ masteryLevelLabels[level] }}
-              </option>
-            </select>
-          </div>
-        </div>
-        <p class="field-hint">掌握程度用于描述理解状态；复习到期是调度状态，两者不混在一起。</p>
-        <p v-if="formError" class="form-error">{{ formError }}</p>
-        <div class="modal-actions">
-          <button type="button" class="btn btn-secondary" @click="knowledgeModalOpen = false">取消</button>
-          <button type="submit" class="btn btn-primary" :disabled="saving">
-            {{ saving ? '保存中…' : knowledgeEditingId ? '保存修改' : '创建知识点' }}
-          </button>
-        </div>
-      </form>
-    </ModalDialog>
 
-    <ModalDialog :open="scheduleModalOpen" title="安排复习" subtitle="默认在晚上 20:00 到期，可以稍后根据回忆表现调整下一次日期。" @close="scheduleModalOpen = false">
+    <ModalDialog :open="scheduleModalOpen" title="安排复习" subtitle="复习只是一个提醒时间；到期后完成复习会把对应任务标记完成。" @close="scheduleModalOpen = false">
       <form class="form" @submit.prevent="submitSchedule">
         <div class="field">
-          <label class="field-label" for="schedule-knowledge">知识点</label>
-          <select id="schedule-knowledge" v-model="scheduleForm.knowledgeItemId" class="select">
-            <option value="" disabled>请选择知识点</option>
-            <option v-for="item in activeKnowledge" :key="item.id" :value="item.id">
-              {{ item.title }}
+          <label class="field-label" for="schedule-task">任务</label>
+          <select id="schedule-task" v-model="scheduleForm.taskId" class="select">
+            <option value="" disabled>请选择任务</option>
+            <option v-for="task in availableTasks" :key="task.id" :value="task.id">
+              {{ task.title }}{{ task.status === 'COMPLETED' ? '（已完成）' : '' }}
             </option>
           </select>
         </div>
@@ -2121,16 +1886,7 @@ onUnmounted(() => {
           <label class="field-label" for="schedule-date">复习日期</label>
           <input id="schedule-date" v-model="scheduleForm.scheduledDate" class="input" type="date" />
         </div>
-        <div class="form-grid">
-          <div class="field">
-            <label class="field-label" for="schedule-tool">外部工具</label>
-            <input id="schedule-tool" v-model="scheduleForm.externalTool" class="input" placeholder="Anki / 纸质笔记" />
-          </div>
-          <div class="field">
-            <label class="field-label" for="schedule-url">工具链接</label>
-            <input id="schedule-url" v-model="scheduleForm.externalUrl" class="input" placeholder="可选" />
-          </div>
-        </div>
+        <p class="field-hint">会在同一天 20:00 到期，并在时间盒里生成一条 30 分钟的复习提醒。</p>
         <p v-if="formError" class="form-error">{{ formError }}</p>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" @click="scheduleModalOpen = false">取消</button>
@@ -2139,60 +1895,6 @@ onUnmounted(() => {
           </button>
         </div>
       </form>
-    </ModalDialog>
-
-    <ModalDialog :open="reviewModalOpen" :title="`复习 · ${reviewTarget ? knowledgeTitle(reviewTarget.knowledgeItemId) : ''}`" subtitle="先主动回忆，再看结果。回忆表现会影响下一次间隔。" @close="reviewModalOpen = false">
-      <div class="form">
-        <div class="recall-prompt">
-          <span class="recall-prompt-label">只看名称，先试着解释</span>
-          <strong>{{ reviewKnowledgeItem?.title ?? '知识点' }}</strong>
-          <span>不要先展开答案。用自己的语言写下核心概念、步骤或一个例子。</span>
-        </div>
-        <div class="field">
-          <label class="field-label" for="review-recall-draft">我的解释</label>
-          <textarea
-            id="review-recall-draft"
-            v-model="recallDraft"
-            class="textarea"
-            placeholder="例如：WalkSAT 每次从当前未满足子句中选择一个变量，再按概率随机翻转或选择使满足子句最多的变量……"
-          />
-        </div>
-        <button v-if="!recallRevealed" type="button" class="btn btn-secondary recall-reveal" @click="revealRecallReference">
-          <AppIcon name="bulb" :size="14" />
-          显示参考内容
-        </button>
-        <div v-else class="recall-reference">
-          <div class="recall-reference-head">
-            <span>参考内容</span>
-            <span v-if="reviewKnowledgeItem?.masteryLevel" class="badge">{{ reviewKnowledgeItem.masteryLevel }}</span>
-          </div>
-          <p>{{ reviewKnowledgeItem?.description || '这个知识点还没有填写说明，请结合来源自行核对回忆内容。' }}</p>
-          <small v-if="reviewKnowledgeItem?.source">来源：{{ reviewKnowledgeItem.source }}</small>
-        </div>
-        <div class="field">
-          <label class="field-label" for="review-recall">回忆结果</label>
-          <select id="review-recall" v-model.number="reviewForm.recall" class="select" :disabled="!recallRevealed">
-            <option v-for="option in recallOptions" :key="option.value" :value="option.value">
-              {{ option.label }}
-            </option>
-          </select>
-          <span v-if="!recallRevealed" class="field-hint">显示参考内容后，再根据实际回忆情况选择结果。</span>
-        </div>
-        <div class="field">
-          <label class="field-label" for="review-difficulty">本次难度（1—5）</label>
-          <input id="review-difficulty" v-model.number="reviewForm.difficulty" class="input" type="number" min="1" max="5" :disabled="!recallRevealed" />
-        </div>
-        <div v-if="recallRevealed" class="next-review">
-          <AppIcon name="calendar" :size="15" />
-          <span>下次复习建议：<strong>{{ nextReviewPreview }}</strong>（约 {{ nextReviewInterval(reviewForm.recall) }} 天后）</span>
-        </div>
-        <div class="modal-actions">
-          <button class="btn btn-secondary" @click="reviewModalOpen = false">取消</button>
-          <button class="btn btn-primary" :disabled="reviewing || !recallRevealed" @click="submitReview">
-            {{ reviewing ? '保存中…' : '记录复习结果' }}
-          </button>
-        </div>
-      </div>
     </ModalDialog>
 
     <ModalDialog :open="detailSession !== null" :title="detailSession ? taskTitle(detailSession.taskId) : '学习会话'" :subtitle="detailSession ? workflowName(detailSession.workflowId) : ''" size="lg" @close="detailSession = null">
@@ -2228,16 +1930,7 @@ onUnmounted(() => {
             <AppIcon name="external" :size="11" />
           </a>
         </article>
-        <div v-if="detailKnowledge.length" class="detail-knowledge">
-          <p class="detail-label">关联知识点</p>
-          <div class="detail-tags">
-            <span v-for="item in detailKnowledge" :key="item.id" class="detail-tag">
-              <span class="level-pill">{{ item.masteryLevel }}</span>
-              {{ item.title }}
-            </span>
-          </div>
         </div>
-      </div>
     </ModalDialog>
 
     <ModalDialog :open="resourceModalOpen" :title="resourceEditingId ? '编辑资源' : '添加资源'" subtitle="只保存名称、类型、链接和说明，内容留在原来的工具里。" @close="resourceModalOpen = false">
@@ -2696,6 +2389,183 @@ onUnmounted(() => {
   line-height: 1.65;
 }
 
+.flow-track {
+  padding: 14px 26px 12px;
+  border-bottom: 1px solid var(--line-faint);
+  overflow-x: auto;
+}
+
+.flow-track ol {
+  display: flex;
+  align-items: flex-start;
+  min-width: max-content;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.flow-track li {
+  position: relative;
+  flex: 1 0 148px;
+}
+
+.flow-track li:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  top: 13px;
+  left: 27px;
+  right: -6px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--line);
+}
+
+.flow-track li.done:not(:last-child)::after {
+  background: color-mix(in srgb, var(--accent) 70%, var(--line));
+}
+
+.flow-track button {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 4px 10px 4px 0;
+  text-align: left;
+}
+
+.flow-track button:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.flow-dot {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.flow-track li.current .flow-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+
+.flow-track li.done .flow-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.flow-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.flow-name {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.flow-meta {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.stage-checklist-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+
+.checklist-progress {
+  color: var(--accent-strong);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.stage-checklist {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stage-checklist li {
+  display: block;
+}
+
+.checklist-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px 11px;
+  border: 1px solid var(--line-faint);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.checklist-item:hover {
+  border-color: var(--line-strong);
+}
+
+.checklist-item input[type='checkbox'] {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  accent-color: var(--accent);
+}
+
+.checklist-item.done .checklist-text {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.checklist-item.done .checklist-index {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.checklist-index {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+}
+
 .session-main {
   padding: 20px 22px 22px;
   min-width: 0;
@@ -2786,6 +2656,11 @@ onUnmounted(() => {
   margin-top: 13px;
 }
 
+.session-actions-hint {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
 .flip {
   transform: rotate(180deg);
 }
@@ -2793,6 +2668,69 @@ onUnmounted(() => {
 .session-interrupt {
   color: var(--danger);
   margin-left: auto;
+}
+
+.session-aux {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.aux-block {
+  overflow: hidden;
+  border: 1px solid var(--line-faint);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+}
+
+.aux-block summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 12px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.aux-block summary::-webkit-details-marker {
+  display: none;
+}
+
+.aux-block summary .icon {
+  color: var(--accent);
+}
+
+.aux-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  margin-left: auto;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+
+.aux-hint {
+  margin: 0 12px 8px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.aux-block .knowledge-link-list,
+.aux-block .side-resource-list {
+  padding: 0 12px 12px;
+}
+
+.aux-block .record-empty {
+  margin: 0 12px 12px;
 }
 
 .session-records {
@@ -3671,6 +3609,29 @@ onUnmounted(() => {
   justify-content: space-between;
   gap: 10px;
   margin-bottom: 7px;
+}
+
+.checklist-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.checklist-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.checklist-editor-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.checklist-editor-row .input {
+  flex: 1;
 }
 
 .stage-editor-list {

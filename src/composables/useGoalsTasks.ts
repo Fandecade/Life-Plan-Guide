@@ -2,12 +2,14 @@ import { computed, ref } from 'vue'
 import {
   GoalStatus,
   ProgressMode,
+
   TaskStatus,
   type Goal,
   type GoalDirection,
   type GoalMilestone,
   type Milestone,
   type NewEntity,
+  type ReviewSchedule,
   type Task,
   type TaskCompetency,
   type TaskDependency,
@@ -58,6 +60,7 @@ export function useGoalsTasks() {
   const goals = ref<Goal[]>([])
   const tasks = ref<Task[]>([])
   const timeboxes = ref<Timebox[]>([])
+  const reviewSchedules = ref<ReviewSchedule[]>([])
   const directions = ref<Direction[]>([])
   const milestones = ref<Milestone[]>([])
   const competencies = ref<Competency[]>([])
@@ -322,6 +325,7 @@ export function useGoalsTasks() {
         goalRows,
         taskRows,
         timeboxRows,
+        reviewScheduleRows,
         directionRows,
         milestoneRows,
         competencyRows,
@@ -334,6 +338,7 @@ export function useGoalsTasks() {
         repos.goals.list({ includeArchived: true }),
         repos.tasks.list({ includeArchived: true }),
         repos.timeboxes.list({ includeArchived: true }),
+        repos.reviewSchedules.list({ includeArchived: true }),
         repos.directions.list({ includeArchived: true }),
         repos.milestones.list({ includeArchived: true }),
         repos.competencies.list({ includeArchived: true }),
@@ -346,6 +351,7 @@ export function useGoalsTasks() {
       goals.value = goalRows
       tasks.value = taskRows
       timeboxes.value = timeboxRows
+      reviewSchedules.value = reviewScheduleRows
       directions.value = directionRows
       milestones.value = milestoneRows
       competencies.value = competencyRows
@@ -653,6 +659,7 @@ export function useGoalsTasks() {
     goals,
     tasks,
     timeboxes,
+    reviewSchedules,
     directions,
     milestones,
     competencies,

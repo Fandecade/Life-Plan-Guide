@@ -106,6 +106,9 @@ export function useDashboard() {
   const knowledgeTitle = (id: string): string =>
     knowledgeItems.value.find((item) => item.id === id)?.title ?? '未知知识点'
 
+  const taskTitle = (id: string | null): string =>
+    id ? tasks.value.find((item) => item.id === id)?.title ?? '未关联任务' : '未关联任务'
+
   const todayTasks = computed(() => {
     return tasks.value
       .filter((task) => isSameDay(task.scheduledDate) || isSameDay(task.dueDate))
@@ -238,6 +241,7 @@ export function useDashboard() {
     return reviewSchedules.value
       .filter(
         (item) =>
+          item.taskId &&
           (item.status === ReviewScheduleStatus.PENDING ||
             item.status === ReviewScheduleStatus.DUE) &&
           item.scheduledAt <= deadline,
@@ -623,6 +627,7 @@ export function useDashboard() {
     greeting,
     dateLabel,
     knowledgeTitle,
+    taskTitle,
     refresh,
     setFocusTask,
     setSummaryRange,

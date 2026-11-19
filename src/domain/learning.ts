@@ -16,6 +16,7 @@ export interface WorkflowStage {
   required: boolean
   needsRecord: boolean
   externalTool: string | null
+  checklist?: string[]
 }
 
 export interface Workflow extends BaseEntity {
@@ -40,6 +41,8 @@ export interface LearningSession extends BaseEntity {
   selfPrediction: number
   actualAssessment: number | null
   actualDuration: number
+  completedStages?: string[]
+  checklistProgress?: Record<string, string[]>
 }
 
 export interface LearningRecord extends BaseEntity {
@@ -62,7 +65,11 @@ export interface KnowledgeItem extends BaseEntity {
 }
 
 export interface ReviewSchedule extends BaseEntity {
-  knowledgeItemId: string
+  knowledgeItemId: string | null
+  taskId?: string | null
+  sessionId?: string | null
+  timeboxId?: string | null
+  previousTaskStatus?: string | null
   scheduledAt: string
   completedAt: string | null
   recallResult: number | null
