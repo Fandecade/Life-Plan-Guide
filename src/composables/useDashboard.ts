@@ -2,7 +2,6 @@ import { computed, ref } from 'vue'
 import {
   GoalStatus,
   HabitStatus,
-  MilestoneStatus,
   Priority,
   ProgressMode,
   ReviewScheduleStatus,
@@ -90,14 +89,12 @@ export function useDashboard() {
   const habits = ref<Awaited<ReturnType<typeof repos.habits.list>>>([])
   const habitLogs = ref<Awaited<ReturnType<typeof repos.habitLogs.list>>>([])
   const reviewSchedules = ref<Awaited<ReturnType<typeof repos.reviewSchedules.list>>>([])
-  const milestones = ref<Awaited<ReturnType<typeof repos.milestones.list>>>([])
   const evidences = ref<Awaited<ReturnType<typeof repos.evidences.list>>>([])
   const sessions = ref<Awaited<ReturnType<typeof repos.learningSessions.list>>>([])
   const timeboxes = ref<Awaited<ReturnType<typeof repos.timeboxes.list>>>([])
   const goals = ref<Awaited<ReturnType<typeof repos.goals.list>>>([])
   const knowledgeItems = ref<Awaited<ReturnType<typeof repos.knowledgeItems.list>>>([])
   const taskGoals = ref<Awaited<ReturnType<typeof repos.taskGoals.list>>>([])
-  const goalMilestones = ref<Awaited<ReturnType<typeof repos.goalMilestones.list>>>([])
   const reviews = ref<Awaited<ReturnType<typeof repos.reviews.list>>>([])
   const settings = ref<UserSettings[]>([])
   const visionCount = ref(0)
@@ -248,18 +245,6 @@ export function useDashboard() {
       .sort((left, right) => left.scheduledAt.localeCompare(right.scheduledAt))
   })
 
-  const upcomingMilestones = computed(() =>
-    milestones.value
-      .filter(
-        (milestone) =>
-          milestone.status !== MilestoneStatus.COMPLETED &&
-          milestone.status !== MilestoneStatus.CANCELLED &&
-          milestone.dueDate !== null,
-      )
-      .sort((left, right) => (left.dueDate ?? '').localeCompare(right.dueDate ?? ''))
-      .slice(0, 3),
-  )
-
   const recentEvidence = computed(() =>
     [...evidences.value]
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
@@ -279,6 +264,13 @@ export function useDashboard() {
     goals.value.filter((goal) => goal.status === GoalStatus.ACTIVE),
   )
 
+  const upcomingGoals = computed(() =>
+    activeGoals.value
+      .filter((goal) => goal.dueDate !== null)
+      .sort((left, right) => (left.dueDate ?? '').localeCompare(right.dueDate ?? ''))
+      .slice(0, 3),
+  )
+
   const activeSession = computed(() => {
     const list = sessions.value
       .filter((session) => session.status === 'IN_PROGRESS')
@@ -286,28 +278,39 @@ export function useDashboard() {
     return list[0] ?? null
   })
 
+  function goalSubtreeIds(goalId: string): string[] {
+    const ids: string[] = []
+    const queue = [goalId]
+    const visited = new Set<string>()
+    while (queue.length > 0) {
+      const currentId = queue.shift()
+      if (!currentId || visited.has(currentId)) continue
+      const goal = goals.value.find((item) => item.id === currentId)
+      if (!goal || (currentId !== goalId && goal.archivedAt)) continue
+      visited.add(currentId)
+      ids.push(currentId)
+      for (const child of goals.value) {
+        if (child.parentGoalId === currentId) queue.push(child.id)
+      }
+    }
+    return ids
+  }
+
   function progressForGoal(goal: Goal): number {
     if (goal.progressMode === ProgressMode.MANUAL) {
       return Math.max(0, Math.min(100, Math.round(goal.manualProgress)))
     }
-    if (goal.progressMode === ProgressMode.MILESTONE_BASED) {
-      const links = goalMilestones.value.filter(
-        (row) => row.goalId === goal.id && !row.archivedAt,
-      )
-      if (links.length === 0) return 0
-      const milestoneMap = new Map(milestones.value.map((item) => [item.id, item]))
-      const completed = links.filter(
-        (row) => milestoneMap.get(row.milestoneId)?.status === MilestoneStatus.COMPLETED,
-      ).length
-      return Math.round((completed / links.length) * 100)
-    }
+    const goalIds = new Set(goalSubtreeIds(goal.id))
     const links = taskGoals.value.filter(
-      (row) => row.goalId === goal.id && !row.archivedAt,
+      (row) => goalIds.has(row.goalId) && !row.archivedAt,
     )
     const taskMap = new Map(tasks.value.map((task) => [task.id, task]))
     let total = 0
     let done = 0
+    const seenTaskIds = new Set<string>()
     for (const row of links) {
+      if (seenTaskIds.has(row.taskId)) continue
+      seenTaskIds.add(row.taskId)
       const task = taskMap.get(row.taskId)
       if (!task || task.archivedAt || task.status === TaskStatus.CANCELLED) continue
       const weight = task.estimatedDuration > 0 ? task.estimatedDuration : 30
@@ -541,14 +544,12 @@ export function useDashboard() {
         habitRows,
         habitLogRows,
         reviewRows,
-        milestoneRows,
         evidenceRows,
         sessionRows,
         timeboxRows,
         goalRows,
         knowledgeRows,
         taskGoalRows,
-        goalMilestoneRows,
         reviewEntryRows,
         settingRows,
         visionTotal,
@@ -557,14 +558,12 @@ export function useDashboard() {
         repos.habits.list(),
         repos.habitLogs.list(),
         repos.reviewSchedules.list(),
-        repos.milestones.list(),
         repos.evidences.list(),
         repos.learningSessions.list(),
         repos.timeboxes.list(),
         repos.goals.list(),
         repos.knowledgeItems.list(),
         repos.taskGoals.list(),
-        repos.goalMilestones.list(),
         repos.reviews.list(),
         repos.userSettings.list(),
         repos.visions.count(),
@@ -574,14 +573,12 @@ export function useDashboard() {
       habits.value = habitRows
       habitLogs.value = habitLogRows
       reviewSchedules.value = reviewRows
-      milestones.value = milestoneRows
       evidences.value = evidenceRows
       sessions.value = sessionRows
       timeboxes.value = timeboxRows
       goals.value = goalRows
       knowledgeItems.value = knowledgeRows
       taskGoals.value = taskGoalRows
-      goalMilestones.value = goalMilestoneRows
       reviews.value = reviewEntryRows
       settings.value = settingRows
       visionCount.value = visionTotal
@@ -609,7 +606,7 @@ export function useDashboard() {
     pendingHabits,
     checkedHabitsToday,
     dueReviews,
-    upcomingMilestones,
+    upcomingGoals,
     recentEvidence,
     todayMinutes,
     activeGoals,

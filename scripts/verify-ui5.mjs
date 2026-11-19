@@ -8,7 +8,7 @@ const CHROME_PATH =
 const ACO_GOAL = '掌握 ACO 求解 SAT 的基本原理与实现'
 const LINUX_GOAL = '掌握嵌入式 Linux 驱动开发'
 const READ_TASK = '阅读 SAT 局部搜索论文'
-const DRIVER_TASK = '阅读 Linux 字符设备驱动框架'
+
 
 function assert(condition, message) {
   if (!condition) throw new Error(message)
@@ -155,6 +155,23 @@ try {
   pass('目标详情抽屉', '验收标准、关联任务与复盘信息')
   await closeDrawer(page)
 
+  await page.waitForSelector('.goal-tree-row', { timeout: 8000 })
+  const collapsedTaskLists = await page.$$eval('.goal-tree-tasks', (nodes) => nodes.length)
+  assert(collapsedTaskLists === 0, '目标下的任务列表默认应收起')
+  const taskToggled = await page.evaluate((needle) => {
+    const row = Array.from(document.querySelectorAll('.goal-tree-row')).find((node) =>
+      (node.textContent ?? '').includes(needle),
+    )
+    const button = row?.querySelector('.goal-task-toggle')
+    if (!button) return false
+    button.click()
+    return true
+  }, ACO_GOAL)
+  assert(taskToggled, '目标行缺少任务展开入口')
+  await page.waitForSelector('.goal-tree-tasks', { timeout: 8000 })
+  await waitText(page, READ_TASK)
+  pass('目标下任务默认收起', '展开后可见关联任务')
+
   await dragGoal(page, LINUX_GOAL, ACO_GOAL)
   await waitText(page, '目标层级已调整')
   await delay(300)
@@ -272,19 +289,29 @@ try {
   assert(stillDoing === beforeDoing + 1, '父任务未完成子任务时不应直接完成')
   pass('看板完成保护', '父任务带着未完成子任务时弹确认')
 
-  await clickText(page, '.view-tab', '四象限')
-  await page.waitForSelector('.quadrant-grid', { timeout: 8000 })
-  await dragSelectorToSelector(page, '.quadrant-task', '.quadrant-q2', DRIVER_TASK)
-  await waitText(page, '任务象限已更新')
-  await page.waitForFunction(
-    (needle) =>
-      Array.from(document.querySelectorAll('.quadrant-q2 .quadrant-task')).some((node) =>
-        (node.textContent ?? '').includes(needle),
-      ),
-    { timeout: 8000, polling: 100 },
-    DRIVER_TASK,
-  )
-  pass('四象限拖拽', `${DRIVER_TASK} → Q2 重要但不紧急`)
+  await clickText(page, '.view-tab', '目标')
+  await page.waitForSelector('.goal-tree', { timeout: 8000 })
+  await page.evaluate((needle) => {
+    const row = Array.from(document.querySelectorAll('.goal-tree-row')).find(
+      (node) => (node.querySelector('.goal-tree-title')?.textContent ?? '').trim().includes(needle),
+    )
+    const addTask = row?.querySelector('button[title="添加任务"]')
+    if (!addTask) throw new Error('未找到目标的“添加任务”按钮')
+    addTask.click()
+  }, ACO_GOAL)
+  await page.waitForSelector('.modal', { timeout: 8000 })
+  const prefilledGoal = await page.evaluate((needle) => {
+    return Array.from(document.querySelectorAll('.chip-check')).some(
+      (label) =>
+        (label.textContent ?? '').includes(needle) &&
+        label.classList.contains('selected') &&
+        Boolean(label.querySelector('input[type="checkbox"]')?.checked),
+    )
+  }, ACO_GOAL)
+  assert(prefilledGoal, '从目标创建任务时未预填关联目标')
+  pass('目标拆任务预填', `关联目标已选中 ${ACO_GOAL}`)
+  await clickText(page, '.modal-actions button', '取消')
+  await page.waitForFunction(() => !document.querySelector('.modal'), { timeout: 8000 })
 
   await clickText(page, '.view-tab', '时间盒')
   await clickText(page, '.seg-btn', '周视图')

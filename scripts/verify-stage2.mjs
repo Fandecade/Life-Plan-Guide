@@ -79,16 +79,17 @@ async function clickInCard(page, cardSelector, text, actionLabel) {
   throw new Error(`未找到包含“${text}”的卡片：${cardSelector}`)
 }
 
-async function clickVision(page, title) {
-  const items = await page.$$('.vision-item')
-  for (const item of items) {
-    const content = await item.evaluate((node) => (node.textContent ?? '').trim())
-    if (content.includes(title)) {
-      await item.click()
-      return
-    }
-  }
-  throw new Error(`未找到愿景：${title}`)
+async function selectVisionByTitle(page, title) {
+  const value = await page.evaluate((needle) => {
+    const select = document.querySelector('#vision-select')
+    if (!select) return ''
+    const option = Array.from(select.options).find((item) =>
+      (item.textContent ?? '').includes(needle),
+    )
+    return option?.value ?? ''
+  }, title)
+  if (!value) throw new Error(`未找到愿景：${title}`)
+  await setSelect(page, '#vision-select', value)
 }
 
 const browser = await puppeteer.launch({
@@ -134,11 +135,9 @@ try {
   assert(stats[1] === '2', `活跃方向应为 2，实际 ${stats[1]}`)
   assert(stats[2] === '2', `身份数应为 2，实际 ${stats[2]}`)
   assert(stats[3] === '22 小时', `每周预算应为 22 小时，实际 ${stats[3]}`)
-  const directionCount = await page.$$eval('.direction-card', (nodes) => nodes.length)
-  const identityCount = await page.$$eval('.identity-item', (nodes) => nodes.length)
-  assert(directionCount === 2, `方向卡应为 2，实际 ${directionCount}`)
-  assert(identityCount === 2, `身份条目应为 2，实际 ${identityCount}`)
-  pass('愿景详情与聚合', `统计 ${stats.join(' / ')}，${directionCount} 个方向，${identityCount} 个身份`)
+  const identityCount = await page.$$eval('.identity-tab-name', (nodes) => nodes.length)
+  assert(identityCount === 2, `身份切换器应为 2，实际 ${identityCount}`)
+  pass('愿景详情与聚合', `统计 ${stats.join(' / ')}，${identityCount} 个身份`)
 
   await clickText(page, '.header-actions button', '新建愿景')
   await page.waitForSelector('#vision-title', { timeout: 8000 })
@@ -164,7 +163,7 @@ try {
   await waitText(page, '（已更新）')
   pass('编辑愿景')
 
-  await clickText(page, '.card button', '添加身份')
+  await clickText(page, '.identity-map-actions button', '添加身份')
   await page.waitForSelector('#identity-title', { timeout: 8000 })
   await setInput(page, '#identity-title', '独立产品开发者')
   await setInput(page, '#identity-statement', '我是一个能够把想法变成真实产品的人。')
@@ -175,7 +174,7 @@ try {
   await waitText(page, '独立产品开发者')
   pass('添加身份')
 
-  await clickText(page, '.card button', '添加方向')
+  await clickText(page, '.identity-map-actions button', '添加方向')
   await page.waitForSelector('#direction-name', { timeout: 8000 })
   const directionIdentity = await page.$eval(
     '#direction-identity',
@@ -196,90 +195,137 @@ try {
   await clickText(page, '.modal-actions button', '添加方向')
   await waitText(page, '发展方向已添加', 15000)
   await waitModalClosed(page)
-  await waitText(page, '产品工程实践')
-  const newCardText = await page.$$eval('.direction-card', (nodes) =>
-    nodes.find((node) => (node.textContent ?? '').includes('产品工程实践'))?.textContent ?? '',
+  await page.waitForFunction(
+    () =>
+      Array.from(document.querySelectorAll('.identity-direction-manage-row')).some((node) =>
+        (node.textContent ?? '').includes('产品工程实践'),
+      ),
+    { timeout: 8000 },
   )
-  assert(newCardText.includes('6 小时 30 分钟'), '方向每周预算未按分钟存储/显示')
-  assert(newCardText.includes('每月'), '方向审视周期未保存')
-  assert(
-    newCardText.includes('所属身份 · 独立产品开发者'),
-    '方向卡未显示所属未来身份',
-  )
+  await page.evaluate(() => {
+    const details = document.querySelector('.identity-direction-manage')
+    if (details) details.open = true
+  })
+  await clickInCard(page, '.identity-direction-manage-row', '产品工程实践', '编辑方向')
+  await page.waitForSelector('#direction-hours', { timeout: 8000 })
+  const savedHours = await page.$eval('#direction-hours', (element) => element.value)
+  assert(Number(savedHours) === 6.5, `方向每周预算未保存为 6.5 小时：${savedHours}`)
+  await clickText(page, '.modal-actions button', '取消')
+  await waitModalClosed(page)
   pass('添加方向', '每周预算 6.5 小时 · 默认绑定当前身份')
 
-  await clickInCard(page, '.direction-card', '产品工程实践', '编辑方向')
+  await clickInCard(page, '.identity-direction-manage-row', '产品工程实践', '编辑方向')
   await page.waitForSelector('#direction-hours', { timeout: 8000 })
   await setInput(page, '#direction-hours', '5')
   await clickText(page, '.modal-actions button', '保存修改')
   await waitText(page, '发展方向已更新', 15000)
   await waitModalClosed(page)
-  const editedCard = await page.$$eval('.direction-card', (nodes) =>
-    nodes.find((node) => (node.textContent ?? '').includes('产品工程实践'))?.textContent ?? '',
-  )
-  assert(editedCard.includes('5 小时'), '方向编辑后预算未更新')
+  await page.evaluate(() => {
+    const details = document.querySelector('.identity-direction-manage')
+    if (details) details.open = true
+  })
+  await clickInCard(page, '.identity-direction-manage-row', '产品工程实践', '编辑方向')
+  await page.waitForSelector('#direction-hours', { timeout: 8000 })
+  const editedHours = await page.$eval('#direction-hours', (element) => element.value)
+  assert(Number(editedHours) === 5, `方向编辑后预算未更新：${editedHours}`)
+  await clickText(page, '.modal-actions button', '取消')
+  await waitModalClosed(page)
   pass('编辑方向')
 
-  await clickInCard(page, '.direction-card', '产品工程实践', '归档方向')
+  await page.evaluate(() => {
+    const details = document.querySelector('.identity-direction-manage')
+    if (details) details.open = true
+  })
+  await clickInCard(page, '.identity-direction-manage-row', '产品工程实践', '归档方向')
   await waitText(page, '归档内容')
   await clickText(page, '.modal-actions button', '确认归档')
   await waitText(page, '已归档，可随时恢复', 15000)
   await waitModalClosed(page)
   await delay(250)
-  const visibleAfterArchive = await page.$$eval('.direction-card', (nodes) =>
+  const visibleAfterArchive = await page.$$eval('.identity-direction-manage-row', (nodes) =>
     nodes.some((node) => (node.textContent ?? '').includes('产品工程实践')),
   )
   assert(!visibleAfterArchive, '归档方向仍然出现在默认列表')
-  pass('归档方向', '默认列表已隐藏')
+  pass('归档方向', '当前身份的路线管理已隐藏')
 
   await clickText(page, '.header-actions button', '显示已归档')
   await waitText(page, '隐藏已归档')
   await delay(250)
-  await clickInCard(page, '.direction-card', '产品工程实践', '恢复方向')
+  await page.evaluate(() => {
+    const details = document.querySelector('.identity-direction-manage')
+    if (details) details.open = true
+  })
+  await clickInCard(page, '.identity-direction-manage-row', '产品工程实践', '恢复方向')
   await waitText(page, '恢复内容')
   await clickText(page, '.modal-actions button', '确认恢复')
   await waitText(page, '已恢复', 15000)
   await waitModalClosed(page)
   await delay(250)
-  const restored = await page.$$eval('.direction-card', (nodes) =>
+  const restored = await page.$$eval('.identity-direction-manage-row', (nodes) =>
     nodes.find((node) => (node.textContent ?? '').includes('产品工程实践'))?.textContent ?? '',
   )
-  assert(!restored.includes('已归档'), '方向恢复后仍带归档标记')
+  assert(restored.includes('产品工程实践'), '方向恢复后未回到路线管理')
   pass('恢复方向')
 
-  await clickInCard(page, '.identity-item', '独立产品开发者', '归档身份')
+  await clickText(page, '.header-actions button', '隐藏已归档')
+  await waitText(page, '显示已归档')
+  await delay(200)
+
+  await page.click('.identity-root-actions button[aria-label="归档身份"]')
   await waitText(page, '归档内容')
   await clickText(page, '.modal-actions button', '确认归档')
   await waitText(page, '已归档，可随时恢复', 15000)
   await waitModalClosed(page)
   await delay(250)
-  await clickInCard(page, '.identity-item', '独立产品开发者', '恢复身份')
+  const tabsAfterArchive = await page.$$eval('.identity-tab-name', (nodes) =>
+    nodes.map((node) => (node.textContent ?? '').trim()),
+  )
+  assert(
+    !tabsAfterArchive.includes('独立产品开发者'),
+    '归档身份仍出现在默认身份切换器',
+  )
+  pass('归档身份', '默认身份切换器已隐藏')
+
+  await clickText(page, '.header-actions button', '显示已归档')
+  await waitText(page, '隐藏已归档')
+  await delay(250)
+  await clickText(page, '.identity-tab', '独立产品开发者')
+  await page.waitForFunction(
+    () =>
+      (document.querySelector('.identity-root-title-row h4')?.textContent ?? '').trim() ===
+      '独立产品开发者',
+    { timeout: 5000 },
+  )
+  await page.click('.identity-root-actions button[aria-label="恢复身份"]')
   await waitText(page, '恢复内容')
   await clickText(page, '.modal-actions button', '确认恢复')
   await waitText(page, '已恢复', 15000)
   await waitModalClosed(page)
+  await page.waitForSelector('.identity-root-actions button[aria-label="归档身份"]', {
+    timeout: 5000,
+  })
   pass('归档与恢复身份')
 
   await clickText(page, '.header-actions button', '隐藏已归档')
   await waitText(page, '显示已归档')
   await delay(200)
 
-  await clickVision(page, '测试愿景：成为独立产品开发者（已更新）')
+  await selectVisionByTitle(page, '测试愿景：成为独立产品开发者（已更新）')
   await delay(200)
   await page.click('button[title="归档愿景"]')
   await waitText(page, '归档内容')
   await clickText(page, '.modal-actions button', '确认归档')
   await delay(400)
   await waitModalClosed(page)
-  const archivedVisionVisible = await page.$$eval('.vision-item', (nodes) =>
+  const archivedVisionVisible = await page.$$eval('#vision-select option', (nodes) =>
     nodes.some((node) => (node.textContent ?? '').includes('（已更新）')),
   )
-  assert(!archivedVisionVisible, '归档愿景仍出现在默认列表')
-  pass('归档愿景', '默认列表已隐藏，子对象未被删除')
+  assert(!archivedVisionVisible, '归档愿景仍出现在默认愿景选择器')
+  pass('归档愿景', '默认选择器已隐藏，子对象未被删除')
 
   await clickText(page, '.header-actions button', '显示已归档')
   await delay(250)
-  await clickVision(page, '测试愿景：成为独立产品开发者（已更新）')
+  await selectVisionByTitle(page, '测试愿景：成为独立产品开发者（已更新）')
   await delay(200)
   const restoreVisible = await page
     .$$eval('.vision-head-actions button', (nodes) =>
@@ -300,7 +346,18 @@ try {
 
   await page.waitForSelector('.vision-head', { timeout: 15000 })
   await waitText(page, '（已更新）')
-  await waitText(page, '产品工程实践')
+  const persistedTabs = await page.$$eval('.identity-tab-name', (nodes) =>
+    nodes.map((node) => (node.textContent ?? '').trim()),
+  )
+  assert(persistedTabs.includes('独立产品开发者'), '刷新后新增身份未保留')
+  await clickText(page, '.identity-tab', '独立产品开发者')
+  await page.waitForFunction(
+    () =>
+      Array.from(document.querySelectorAll('.identity-direction-manage-row')).some((node) =>
+        (node.textContent ?? '').includes('产品工程实践'),
+      ),
+    { timeout: 8000 },
+  )
   pass('刷新后持久化', '愿景、身份、方向均保留')
 
   assert(
@@ -315,7 +372,10 @@ try {
   }
 } catch (error) {
   await page.screenshot({ path: '/tmp/growth-os-stage2-failure.png', fullPage: true }).catch(() => {})
-  console.error('\n阶段 2 验收失败：', error instanceof Error ? error.message : error)
+  console.error(
+    '\n阶段 2 验收失败：',
+    error instanceof Error ? (error.stack ?? error.message) : error,
+  )
   if (consoleErrors.length) {
     console.error('控制台错误：\n' + consoleErrors.join('\n'))
   }

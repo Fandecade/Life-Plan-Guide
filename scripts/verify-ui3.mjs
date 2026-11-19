@@ -115,6 +115,36 @@ try {
   await page.waitForSelector('.capability-name', { timeout: 15000 })
   await waitText(page, '身份能力树')
 
+  const selectedVisionTitle = await page.$eval(
+    '#vision-select',
+    (element) => element.selectedOptions[0]?.textContent?.trim() ?? '',
+  )
+  assert(
+    selectedVisionTitle.includes('成为具备独立研究与工程实践能力的技术人才'),
+    `FUTURE VISION 未显示当前愿景：${selectedVisionTitle}`,
+  )
+  const removedFuturePanels = await page.evaluate(() => ({
+    visionRail: document.querySelectorAll('.vision-rail').length,
+    identityList: document.querySelectorAll('.identity-list').length,
+    directionGrid: document.querySelectorAll('.direction-grid').length,
+  }))
+  assert(removedFuturePanels.visionRail === 0, '旧愿景侧栏仍然存在')
+  assert(removedFuturePanels.identityList === 0, '重复的“未来身份”列表仍然存在')
+  assert(removedFuturePanels.directionGrid === 0, '重复的“发展方向”列表仍然存在')
+  pass('愿景选择整合', selectedVisionTitle)
+
+  await clickText(page, '.identity-map-actions button', '收起能力树')
+  await page.waitForFunction(
+    () => getComputedStyle(document.querySelector('.identity-tree-body')).display === 'none',
+    { timeout: 5000 },
+  )
+  await clickText(page, '.identity-map-actions button', '展开能力树')
+  await page.waitForFunction(
+    () => getComputedStyle(document.querySelector('.identity-tree-body')).display !== 'none',
+    { timeout: 5000 },
+  )
+  pass('整棵能力树折叠', '可收起并恢复身份树主体，身份切换器保持可见')
+
   const identityTabs = await page.$$eval('.identity-tab-name', (nodes) =>
     nodes.map((node) => node.textContent?.trim() ?? ''),
   )
@@ -122,6 +152,13 @@ try {
   assert(
     identityTabs.includes('软硬件全栈工程师') && identityTabs.includes('独立研究者'),
     `身份切换器内容不正确：${identityTabs.join(' / ')}`,
+  )
+  await clickText(page, '.identity-tab', '软硬件全栈工程师')
+  await page.waitForFunction(
+    () =>
+      (document.querySelector('.identity-root-title-row h4')?.textContent ?? '').trim() ===
+      '软硬件全栈工程师',
+    { timeout: 5000 },
   )
   const rootIdentity = await page.$eval(
     '.identity-root-title-row h4',
@@ -146,7 +183,40 @@ try {
   )
   pass('身份能力树', `根身份 ${rootIdentity}，${capabilityNames.length} 个能力节点`)
 
-  await clickText(page, '.roadmap-link', '在发展路线中查看')
+  await page.click('.tree-toggle')
+  await page.waitForFunction(
+    (previous) => document.querySelectorAll('.capability-name').length < previous,
+    { timeout: 5000 },
+    capabilityNames.length,
+  )
+  await page.click('.tree-toggle')
+  await page.waitForFunction(
+    (previous) => document.querySelectorAll('.capability-name').length === previous,
+    { timeout: 5000 },
+    capabilityNames.length,
+  )
+  pass('单节点能力折叠', '子能力分支可单独收起并恢复')
+
+  const rootCapabilityCount = await page.$$eval(
+    '.capability-tree-root > .capability-node',
+    (nodes) => nodes.length,
+  )
+  await clickText(page, '.capability-tree-head-actions button', '全部收起')
+  await page.waitForFunction(
+    (expected) => document.querySelectorAll('.capability-name').length === expected,
+    { timeout: 5000 },
+    rootCapabilityCount,
+  )
+  await clickText(page, '.capability-tree-head-actions button', '全部展开')
+  await page.waitForFunction(
+    (expected) => document.querySelectorAll('.capability-name').length === expected,
+    { timeout: 5000 },
+    capabilityNames.length,
+  )
+  pass('能力节点全部展开收起', `${rootCapabilityCount} 个根节点，恢复 ${capabilityNames.length} 个节点`)
+
+  await page.click('.identity-direction-manage summary')
+  await clickText(page, '.identity-direction-manage .link-btn', '软硬件全栈工程')
   await page.waitForFunction(() => location.pathname === '/roadmap', { timeout: 10000 })
   await page.waitForSelector('.direction-card', { timeout: 15000 })
   await page.waitForFunction(() => location.search === '', { timeout: 10000 })

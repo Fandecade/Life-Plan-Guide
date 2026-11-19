@@ -1,8 +1,6 @@
 import { computed, ref } from 'vue'
 import {
   GoalStatus,
-  MilestoneStatus,
-  Priority,
   ProgressMode,
   TaskStatus,
   type Goal,
@@ -32,13 +30,6 @@ export interface TaskNode {
 }
 
 const CLOSED_STATUSES = new Set<string>([TaskStatus.COMPLETED, TaskStatus.CANCELLED])
-const OPEN_STATUSES = new Set<string>([
-  TaskStatus.BACKLOG,
-  TaskStatus.TODO,
-  TaskStatus.IN_PROGRESS,
-  TaskStatus.PAUSED,
-  TaskStatus.BLOCKED,
-])
 
 const taskStatusRank: Record<string, number> = {
   IN_PROGRESS: 0,
@@ -55,15 +46,6 @@ const priorityRank: Record<string, number> = {
   HIGH: 3,
   MEDIUM: 2,
   LOW: 1,
-}
-
-function quadrantKeyFor(task: Task): 'q1' | 'q2' | 'q3' | 'q4' {
-  const important = task.importance === 'CRITICAL' || task.importance === 'IMPORTANT'
-  const urgent = task.urgency === 'HIGH'
-  if (important && urgent) return 'q1'
-  if (important) return 'q2'
-  if (urgent) return 'q3'
-  return 'q4'
 }
 
 function clampPercent(value: number): number {
@@ -167,15 +149,40 @@ export function useGoalsTasks() {
     return map
   })
 
+  function goalSubtreeIds(goalId: string): string[] {
+    const ids: string[] = []
+    const queue = [goalId]
+    const visited = new Set<string>()
+    while (queue.length > 0) {
+      const currentId = queue.shift()
+      if (!currentId || visited.has(currentId)) continue
+      visited.add(currentId)
+      ids.push(currentId)
+      for (const goal of goals.value) {
+        if (goal.parentGoalId === currentId) queue.push(goal.id)
+      }
+    }
+    return ids
+  }
+
+  function taskIdsForGoalTree(goalId: string): string[] {
+    const goalIds = new Set(goalSubtreeIds(goalId))
+    return Object.entries(taskGoalIds.value)
+      .filter(([, linkedGoalIds]) => linkedGoalIds.some((id) => goalIds.has(id)))
+      .map(([taskId]) => taskId)
+  }
+
   const goalTaskStats = computed<Record<string, { total: number; done: number }>>(() => {
     const map: Record<string, { total: number; done: number }> = {}
     const taskMap = new Map(tasks.value.map((task) => [task.id, task]))
-    for (const row of activeRelations.taskGoals.value) {
-      const task = taskMap.get(row.taskId)
-      if (!task || task.archivedAt || task.status === TaskStatus.CANCELLED) continue
-      if (!map[row.goalId]) map[row.goalId] = { total: 0, done: 0 }
-      map[row.goalId].total += 1
-      if (task.status === TaskStatus.COMPLETED) map[row.goalId].done += 1
+    for (const goal of goals.value) {
+      map[goal.id] = { total: 0, done: 0 }
+      for (const taskId of taskIdsForGoalTree(goal.id)) {
+        const task = taskMap.get(taskId)
+        if (!task || task.archivedAt || task.status === TaskStatus.CANCELLED) continue
+        map[goal.id].total += 1
+        if (task.status === TaskStatus.COMPLETED) map[goal.id].done += 1
+      }
     }
     return map
   })
@@ -217,17 +224,7 @@ export function useGoalsTasks() {
       return clampPercent(goal.manualProgress)
     }
 
-    if (goal.progressMode === ProgressMode.MILESTONE_BASED) {
-      const ids = goalMilestoneIds.value[goal.id] ?? []
-      if (ids.length === 0) return 0
-      const milestoneMap = new Map(milestones.value.map((milestone) => [milestone.id, milestone]))
-      const completed = ids.filter(
-        (id) => milestoneMap.get(id)?.status === MilestoneStatus.COMPLETED,
-      ).length
-      return clampPercent((completed / ids.length) * 100)
-    }
-
-    const ids = taskGoalIds.value[goal.id] ?? []
+    const ids = taskIdsForGoalTree(goal.id)
     const taskMap = new Map(tasks.value.map((task) => [task.id, task]))
     let totalWeight = 0
     let completedWeight = 0
@@ -366,37 +363,11 @@ export function useGoalsTasks() {
 
   async function saveGoal(
     input: GoalInput,
-    directionIds: string[],
-    milestoneIds: string[],
     id?: string,
   ): Promise<Goal> {
     const entity = id
       ? await repos.goals.update(id, input)
       : await repos.goals.create(input)
-
-    const existingDirections = activeRelations.goalDirections.value.filter(
-      (row) => row.goalId === entity.id,
-    )
-    for (const row of existingDirections) {
-      if (!directionIds.includes(row.directionId)) await repos.goalDirections.remove(row.id)
-    }
-    for (const directionId of directionIds) {
-      if (!existingDirections.some((row) => row.directionId === directionId)) {
-        await repos.goalDirections.create({ goalId: entity.id, directionId })
-      }
-    }
-
-    const existingMilestones = activeRelations.goalMilestones.value.filter(
-      (row) => row.goalId === entity.id,
-    )
-    for (const row of existingMilestones) {
-      if (!milestoneIds.includes(row.milestoneId)) await repos.goalMilestones.remove(row.id)
-    }
-    for (const milestoneId of milestoneIds) {
-      if (!existingMilestones.some((row) => row.milestoneId === milestoneId)) {
-        await repos.goalMilestones.create({ goalId: entity.id, milestoneId })
-      }
-    }
 
     await refresh()
     return entity
@@ -655,49 +626,19 @@ export function useGoalsTasks() {
       })
   }
 
-  function quadrantTasks(goalFilter = 'all') {
-    const open = visibleTasks.value.filter((task) => OPEN_STATUSES.has(task.status))
-    const filtered =
-      goalFilter === 'all'
-        ? open
-        : open.filter((task) => (taskGoalIds.value[task.id] ?? []).includes(goalFilter))
-    const isImportant = (task: Task) =>
-      task.importance === 'CRITICAL' || task.importance === 'IMPORTANT'
-    const isUrgent = (task: Task) => task.urgency === 'HIGH'
-    const order = (task: Task) =>
-      `${String(9 - (priorityRank[task.priority] ?? 0)).padStart(2, '0')}:${task.title}`
-    const sorted = filtered.slice().sort((left, right) => order(left).localeCompare(order(right), 'zh-CN'))
-    return {
-      q1: sorted.filter((task) => isImportant(task) && isUrgent(task)),
-      q2: sorted.filter((task) => isImportant(task) && !isUrgent(task)),
-      q3: sorted.filter((task) => !isImportant(task) && isUrgent(task)),
-      q4: sorted.filter((task) => !isImportant(task) && !isUrgent(task)),
-    }
-  }
-
-  async function moveTaskWithinQuadrant(
-    id: string,
-    direction: 'up' | 'down',
-  ): Promise<void> {
-    const task = tasks.value.find((row) => row.id === id)
-    if (!task) throw new Error('任务不存在')
-    const key = quadrantKeyFor(task)
-    const grouped = quadrantTasks('all')
-    const rows = grouped[key].slice()
-    const index = rows.findIndex((row) => row.id === id)
-    if (index < 0) throw new Error('任务不在可排序的象限中')
-    const swapIndex = direction === 'up' ? index - 1 : index + 1
-    if (swapIndex < 0 || swapIndex >= rows.length) return
-    ;[rows[index], rows[swapIndex]] = [rows[swapIndex], rows[index]]
-
-    const levels = [Priority.URGENT, Priority.HIGH, Priority.MEDIUM, Priority.LOW]
-    await Promise.all(
-      rows.map((row, position) => {
-        const priority = levels[Math.min(levels.length - 1, Math.floor((position * levels.length) / rows.length))]
-        return row.priority === priority ? Promise.resolve(row) : repos.tasks.update(row.id, { priority })
-      }),
-    )
-    await refresh()
+  function tasksForGoalTree(goalId: string): Task[] {
+    const goalIds = new Set([goalId, ...goalDescendants(goalId)])
+    return tasks.value
+      .filter(
+        (task) =>
+          !task.archivedAt &&
+          (taskGoalIds.value[task.id] ?? []).some((id) => goalIds.has(id)),
+      )
+      .sort((left, right) => {
+        const leftRank = taskStatusRank[left.status] ?? 9
+        const rightRank = taskStatusRank[right.status] ?? 9
+        return leftRank - rightRank
+      })
   }
 
   function timeboxesForTask(taskId: string): Timebox[] {
@@ -732,9 +673,9 @@ export function useGoalsTasks() {
     keywordsForTask,
     taskDescendants,
     incompleteChildren,
-    quadrantTasks,
     timeboxesForTask,
     tasksForGoal,
+    tasksForGoalTree,
     goalDescendants,
     refresh,
     saveGoal,
@@ -747,7 +688,6 @@ export function useGoalsTasks() {
     saveTimebox,
     resizeTimebox,
     deleteTimebox,
-    moveTaskWithinQuadrant,
     setArchived,
     endOfDay,
   }

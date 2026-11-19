@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import AppIcon from '@/components/AppIcon.vue'
 import {
   competencyCategoryLabels,
@@ -15,12 +15,14 @@ const props = withDefaults(
   defineProps<{
     node: IdentityCapabilityNode
     depth?: number
+    forceCollapsed?: boolean
   }>(),
-  { depth: 0 },
+  { depth: 0, forceCollapsed: false },
 )
 
 const emit = defineEmits<{
   viewDirection: [directionId: string]
+  viewGoals: [competencyId: string]
 }>()
 
 const collapsed = ref(false)
@@ -29,6 +31,14 @@ const progress = computed(() => levelPercent(props.node.competency.currentLevel)
 const target = computed(() => levelPercent(props.node.competency.targetLevel))
 const primaryDirection = computed(() => props.node.directions[0] ?? null)
 const isGroup = computed(() => !props.node.isDirect && props.node.children.length > 0)
+
+watch(
+  () => props.forceCollapsed,
+  (value) => {
+    collapsed.value = value
+  },
+  { immediate: true },
+)
 
 function toggle(): void {
   collapsed.value = !collapsed.value
@@ -116,19 +126,28 @@ function directionLevel(competency: Competency, directionId: string): string {
 
         <div class="capability-foot">
           <span class="capability-meta">
-            <AppIcon name="flag" :size="13" />
-            {{ node.milestoneCount }} 个相关里程碑
+            <AppIcon name="target" :size="13" />
+            {{ node.goalCount }} 个关联目标
           </span>
-          <button
-            v-if="primaryDirection"
-            type="button"
-            class="roadmap-link"
-            @click.stop="emit('viewDirection', primaryDirection.id)"
-          >
-            在发展路线中查看
-            <AppIcon name="arrow-right" :size="13" />
-          </button>
-          <span v-else class="branch-note">能力分支由下方子能力共同完成</span>
+          <div class="capability-foot-actions">
+            <button
+              v-if="primaryDirection"
+              type="button"
+              class="roadmap-link"
+              @click.stop="emit('viewDirection', primaryDirection.id)"
+            >
+              查看路线
+              <AppIcon name="arrow-right" :size="13" />
+            </button>
+            <button
+              type="button"
+              class="goal-link"
+              @click.stop="emit('viewGoals', node.competency.id)"
+            >
+              拆解为目标
+              <AppIcon name="arrow-right" :size="13" />
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -139,7 +158,9 @@ function directionLevel(competency: Competency, directionId: string): string {
         :key="child.competency.id"
         :node="child"
         :depth="depth + 1"
+        :force-collapsed="forceCollapsed"
         @view-direction="emit('viewDirection', $event)"
+        @view-goals="emit('viewGoals', $event)"
       />
     </ul>
   </li>
@@ -427,6 +448,14 @@ function directionLevel(competency: Competency, directionId: string): string {
   font-size: 12px;
 }
 
+.capability-foot-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .roadmap-link {
   display: inline-flex;
   align-items: center;
@@ -440,9 +469,23 @@ function directionLevel(competency: Competency, directionId: string): string {
   color: var(--accent-hover);
 }
 
-.branch-note {
-  color: var(--muted);
-  font-size: 11.5px;
+.goal-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 3px 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.goal-link:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 11%, var(--surface));
 }
 
 .capability-children {
@@ -492,6 +535,10 @@ function directionLevel(competency: Competency, directionId: string): string {
   .capability-foot {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .capability-foot-actions {
+    justify-content: flex-start;
   }
 
   .capability-badges {

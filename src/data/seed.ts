@@ -75,6 +75,8 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
     identityStatement: '我是一个能够把复杂系统真正做出来的工程师。',
   })
 
+  await new Promise((resolve) => setTimeout(resolve, 5))
+
   const researcherIdentity = await repos.identities.create({
     visionId: vision.id,
     title: '独立研究者',
@@ -257,12 +259,13 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
     description: '以论文复现为主线，完成算法实现、基准测试和实验分析。',
     goalType: GoalType.COMPETENCY,
     parentGoalId: null,
+    competencyId: competencySat.id,
     startDate: at(-14, 9),
     dueDate: at(12, 18),
     priority: Priority.HIGH,
     successCriteria: '能独立解释算法、运行代码、复现实验并分析结果。',
     status: GoalStatus.ACTIVE,
-    progressMode: ProgressMode.MILESTONE_BASED,
+    progressMode: ProgressMode.TASK_BASED,
     manualProgress: 0,
     reviewFrequency: '每周',
   })
@@ -272,12 +275,13 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
     description: '从阅读框架开始，完成一个字符设备驱动和测试记录。',
     goalType: GoalType.COMPETENCY,
     parentGoalId: null,
+    competencyId: competencyLinux.id,
     startDate: at(7, 9),
     dueDate: at(90, 18),
     priority: Priority.MEDIUM,
     successCriteria: '能独立编写、加载、调试字符设备驱动。',
     status: GoalStatus.ACTIVE,
-    progressMode: ProgressMode.MILESTONE_BASED,
+    progressMode: ProgressMode.TASK_BASED,
     manualProgress: 0,
     reviewFrequency: '每两周',
   })

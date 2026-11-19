@@ -42,7 +42,7 @@ const commands: CommandItem[] = [
   {
     id: 'cmd-roadmap',
     title: '发展路线图',
-    subtitle: '能力地图、里程碑与时间线',
+    subtitle: '发展方向与能力树',
     route: '/roadmap',
     icon: 'map',
     type: 'command',
@@ -50,7 +50,7 @@ const commands: CommandItem[] = [
   {
     id: 'cmd-goals',
     title: '目标与任务',
-    subtitle: '目标拆解、WBS、四象限与时间盒',
+    subtitle: '多级目标、任务与时间盒',
     route: '/goals',
     icon: 'target',
     type: 'command',

@@ -25,13 +25,12 @@ import {
   Urgency,
   goalStatusLabels,
   goalTypeLabels,
-  importanceLabels,
   priorityLabels,
   progressModeLabels,
   taskStatusLabels,
   taskTypeLabels,
   timeboxStatusLabels,
-  urgencyLabels,
+  type Competency,
   type Goal,
   type Task,
   type Timebox,
@@ -59,14 +58,10 @@ const {
   goals,
   tasks,
   timeboxes,
-  directions,
-  milestones,
   competencies,
   activeGoals,
   visibleGoals,
   visibleTasks,
-  goalDirectionIds,
-  goalMilestoneIds,
   taskGoalIds,
   predecessorIds,
   taskNameById,
@@ -78,33 +73,33 @@ const {
   keywordsForTask,
   taskDescendants,
   incompleteChildren,
-  quadrantTasks,
   tasksForGoal,
+  tasksForGoalTree,
   refresh,
   saveGoal,
   saveTask,
   setTaskStatus,
-  setTaskQuadrant,
   setGoalParent,
   moveTimeboxToDate,
   saveDependencies,
   saveTimebox,
   resizeTimebox,
   deleteTimebox,
-  moveTaskWithinQuadrant,
   setArchived,
 } = useGoalsTasks()
 
-type MainView = 'goals' | 'tasks' | 'quadrants' | 'timeboxes'
+type MainView = 'goals' | 'tasks' | 'timeboxes'
 
 const activeView = ref<MainView>('goals')
 const goalFilter = ref('all')
+const competencyFilter = ref('all')
 const showCompleted = ref(true)
 const goalDisplayMode = ref<'tree' | 'cards'>('tree')
 const taskDisplayMode = ref<'wbs' | 'kanban'>('wbs')
 type TimeboxDisplayMode = 'day' | 'week' | 'month' | 'list'
 const timeboxDisplayMode = ref<TimeboxDisplayMode>('list')
 const collapsedGoalIds = ref<Set<string>>(new Set())
+const expandedGoalTaskIds = ref<Set<string>>(new Set())
 const detailGoalId = ref<string | null>(null)
 const detailTaskId = ref<string | null>(null)
 const goalDragId = ref<string | null>(null)
@@ -118,42 +113,72 @@ const goalStatuses = [
   GoalStatus.COMPLETED,
   GoalStatus.CANCELLED,
 ]
-const progressModes = Object.values(ProgressMode)
+const progressModes = [ProgressMode.TASK_BASED, ProgressMode.MANUAL]
 const priorities = [Priority.URGENT, Priority.HIGH, Priority.MEDIUM, Priority.LOW]
 const taskTypes = Object.values(TaskType)
 const taskStatuses = Object.values(TaskStatus)
-const importances = [Importance.CRITICAL, Importance.IMPORTANT, Importance.NORMAL]
-const urgencies = [Urgency.HIGH, Urgency.MEDIUM, Urgency.LOW]
-
-const directionOptions = computed(() =>
-  directions.value.filter((direction) => !direction.archivedAt),
-)
-
-const milestoneOptions = computed(() =>
-  milestones.value.filter((milestone) => !milestone.archivedAt),
-)
 
 const competencyOptions = computed(() =>
-  competencies.value.filter((competency) => !competency.archivedAt),
+  competencies.value
+    .filter((competency) => !competency.archivedAt)
+    .sort((left, right) =>
+      competencyPath(left.id).localeCompare(competencyPath(right.id), 'zh-CN'),
+    ),
 )
 
-const directionMap = computed<Record<string, { name: string; color: string }>>(() => {
-  const map: Record<string, { name: string; color: string }> = {}
-  for (const direction of directions.value) {
-    map[direction.id] = { name: direction.name, color: direction.color }
+const competencyMap = computed<Record<string, Competency>>(() => {
+  const map: Record<string, Competency> = {}
+  for (const competency of competencies.value) {
+    map[competency.id] = competency
   }
   return map
+})
+
+function competencyPath(id: string | null): string {
+  if (!id) return ''
+  const names: string[] = []
+  const visited = new Set<string>()
+  let current: Competency | undefined = competencyMap.value[id]
+  while (current && !visited.has(current.id)) {
+    visited.add(current.id)
+    names.unshift(current.name)
+    current = current.parentId ? competencyMap.value[current.parentId] : undefined
+  }
+  return names.join(' / ')
+}
+
+function competencyIsWithin(competencyId: string | null, ancestorId: string): boolean {
+  const visited = new Set<string>()
+  let currentId = competencyId
+  while (currentId && !visited.has(currentId)) {
+    if (currentId === ancestorId) return true
+    visited.add(currentId)
+    currentId = competencyMap.value[currentId]?.parentId ?? null
+  }
+  return false
+}
+
+const displayedGoals = computed<Goal[]>(() => {
+  if (competencyFilter.value === 'all') return visibleGoals.value
+
+  const selected = new Set<string>()
+  for (const goal of visibleGoals.value) {
+    if (!competencyIsWithin(goal.competencyId, competencyFilter.value)) continue
+    selected.add(goal.id)
+    const visited = new Set<string>()
+    let parentId = goal.parentGoalId
+    while (parentId && !visited.has(parentId)) {
+      visited.add(parentId)
+      selected.add(parentId)
+      parentId = goalMap.value[parentId]?.parentGoalId ?? null
+    }
+  }
+  return visibleGoals.value.filter((goal) => selected.has(goal.id))
 })
 
 const goalMap = computed<Record<string, Goal>>(() => {
   const map: Record<string, Goal> = {}
   for (const goal of goals.value) map[goal.id] = goal
-  return map
-})
-
-const milestoneMap = computed<Record<string, string>>(() => {
-  const map: Record<string, string> = {}
-  for (const milestone of milestones.value) map[milestone.id] = milestone.name
   return map
 })
 
@@ -192,39 +217,6 @@ const timeboxCounts = computed<Record<string, number>>(() => {
 })
 
 const taskTree = computed(() => buildTaskTree(goalFilter.value, showCompleted.value))
-const quadrants = computed(() => quadrantTasks(goalFilter.value))
-
-const quadrantMeta = [
-  {
-    key: 'q1' as const,
-    code: 'Q1',
-    title: '重要且紧急',
-    action: '立即处理',
-    note: '截止期近、影响大的任务。先做，但不要长期停留在这里。',
-  },
-  {
-    key: 'q2' as const,
-    code: 'Q2',
-    title: '重要但不紧急',
-    action: '重点规划',
-    note: '长期能力、科研与项目积累。这里决定未来的差距。',
-  },
-  {
-    key: 'q3' as const,
-    code: 'Q3',
-    title: '紧急但不重要',
-    action: '尽量简化',
-    note: '临时事务与打断。能委托、简化或拒绝的尽量处理掉。',
-  },
-  {
-    key: 'q4' as const,
-    code: 'Q4',
-    title: '不重要且不紧急',
-    action: '限制时间',
-    note: '低价值消耗。允许休息，但需要有意识地选择。',
-  },
-]
-
 interface TimeboxGroup {
   key: string
   label: string
@@ -256,13 +248,19 @@ const detailGoalTasks = computed(() =>
   detailGoal.value ? tasksForGoal(detailGoal.value.id) : [],
 )
 
-const detailGoalMilestones = computed(() =>
+const detailGoalChildren = computed(() =>
   detailGoal.value
-    ? (goalMilestoneIds.value[detailGoal.value.id] ?? [])
-        .map((id) => milestoneMap.value[id])
-        .filter((name): name is string => Boolean(name))
+    ? visibleGoals.value.filter((goal) => goal.parentGoalId === detailGoal.value?.id)
     : [],
 )
+
+const goalChildCounts = computed<Record<string, number>>(() => {
+  const counts: Record<string, number> = {}
+  for (const goal of visibleGoals.value) {
+    if (goal.parentGoalId) counts[goal.parentGoalId] = (counts[goal.parentGoalId] ?? 0) + 1
+  }
+  return counts
+})
 
 function openGoalDetail(goal: Goal): void {
   detailGoalId.value = goal.id
@@ -294,6 +292,29 @@ function addTaskForDetailGoal(): void {
   if (goal) openTaskForGoal(goal)
 }
 
+function addChildGoalForDetail(): void {
+  const goal = detailGoal.value
+  if (goal) openGoalCreate(goal, goal.competencyId ?? undefined)
+}
+
+function timeboxForDetailGoal(): void {
+  const goal = detailGoal.value
+  if (!goal) return
+  const firstTask = tasksForGoal(goal.id).find((task) => task.status !== TaskStatus.CANCELLED)
+  closeGoalDetail()
+  if (!firstTask) {
+    openTaskForGoal(goal)
+    formError.value = '先为这个目标添加一个可执行任务，再安排时间盒。'
+    return
+  }
+  openTimeboxCreate(firstTask)
+}
+
+function filterByCompetency(competencyId: string | null): void {
+  competencyFilter.value = competencyId ?? 'all'
+  activeView.value = 'goals'
+}
+
 function archiveTaskFromDetail(): void {
   const task = detailTask.value
   closeTaskDetail()
@@ -307,13 +328,13 @@ interface GoalTreeRow {
 }
 
 const goalTreeRows = computed<GoalTreeRow[]>(() => {
-  const visibleIds = new Set(visibleGoals.value.map((goal) => goal.id))
-  const roots = visibleGoals.value.filter(
+  const visibleIds = new Set(displayedGoals.value.map((goal) => goal.id))
+  const roots = displayedGoals.value.filter(
     (goal) => !goal.parentGoalId || !visibleIds.has(goal.parentGoalId),
   )
   const rows: GoalTreeRow[] = []
   const walk = (goal: Goal, depth: number): void => {
-    const children = visibleGoals.value.filter((item) => item.parentGoalId === goal.id)
+    const children = displayedGoals.value.filter((item) => item.parentGoalId === goal.id)
     rows.push({ goal, depth, hasChildren: children.length > 0 })
     if (!collapsedGoalIds.value.has(goal.id)) {
       for (const child of children) walk(child, depth + 1)
@@ -328,6 +349,13 @@ function toggleGoalCollapse(goalId: string): void {
   if (next.has(goalId)) next.delete(goalId)
   else next.add(goalId)
   collapsedGoalIds.value = next
+}
+
+function toggleGoalTasks(goalId: string): void {
+  const next = new Set(expandedGoalTaskIds.value)
+  if (next.has(goalId)) next.delete(goalId)
+  else next.add(goalId)
+  expandedGoalTaskIds.value = next
 }
 
 function startGoalDrag(goal: Goal, event: DragEvent): void {
@@ -448,41 +476,6 @@ async function dropTaskToKanban(column: { key: string; title: string; status: Ta
   try {
     await setTaskStatus(task.id, column.status)
     success(`任务已移动到「${column.title ?? ''}」`)
-  } catch (caught) {
-    toastError(caught instanceof Error ? caught.message : String(caught))
-  }
-}
-
-const quadrantDragId = ref<string | null>(null)
-
-function startQuadrantDrag(task: Task, event: DragEvent): void {
-  quadrantDragId.value = task.id
-  event.dataTransfer?.setData('text/plain', task.id)
-  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
-}
-
-async function dropTaskToQuadrant(quadrant: 'q1' | 'q2' | 'q3' | 'q4'): Promise<void> {
-  const id = quadrantDragId.value
-  quadrantDragId.value = null
-  if (!id) return
-  const matrix = {
-    q1: { importance: Importance.IMPORTANT, urgency: Urgency.HIGH },
-    q2: { importance: Importance.IMPORTANT, urgency: Urgency.MEDIUM },
-    q3: { importance: Importance.NORMAL, urgency: Urgency.HIGH },
-    q4: { importance: Importance.NORMAL, urgency: Urgency.LOW },
-  }[quadrant]
-  try {
-    await setTaskQuadrant(id, matrix.importance, matrix.urgency)
-    success('任务象限已更新')
-  } catch (caught) {
-    toastError(caught instanceof Error ? caught.message : String(caught))
-  }
-}
-
-async function moveQuadrantTask(task: Task, direction: 'up' | 'down'): Promise<void> {
-  try {
-    await moveTaskWithinQuadrant(task.id, direction)
-    success(direction === 'up' ? '任务已上移' : '任务已下移')
   } catch (caught) {
     toastError(caught instanceof Error ? caught.message : String(caught))
   }
@@ -699,8 +692,7 @@ interface GoalFormState {
   progressMode: ProgressMode
   manualProgress: number
   reviewFrequency: string
-  directionIds: string[]
-  milestoneIds: string[]
+  competencyId: string
 }
 
 function emptyGoalForm(): GoalFormState {
@@ -717,8 +709,7 @@ function emptyGoalForm(): GoalFormState {
     progressMode: ProgressMode.TASK_BASED,
     manualProgress: 0,
     reviewFrequency: '每周',
-    directionIds: [],
-    milestoneIds: [],
+    competencyId: '',
   }
 }
 
@@ -761,6 +752,7 @@ function emptyTaskForm(): TaskFormState {
 }
 
 interface TimeboxFormState {
+  goalId: string
   taskId: string
   plannedStart: string
   plannedEnd: string
@@ -770,6 +762,7 @@ interface TimeboxFormState {
 
 function emptyTimeboxForm(): TimeboxFormState {
   return {
+    goalId: '',
     taskId: '',
     plannedStart: '',
     plannedEnd: '',
@@ -799,7 +792,7 @@ const modalTitle = computed(() => {
 
 const modalSubtitle = computed(() => {
   if (modalKind.value === 'goal') {
-    return '目标描述要实现的成果，可以用任务、里程碑或人工判断来计算进度。'
+    return '目标承接一个能力锚点，可以继续拆成子目标；能够直接行动时再添加任务。'
   }
   if (modalKind.value === 'task') {
     return '任务是一次性行动，可以和多个目标、能力关联，也可以独立存在。'
@@ -860,6 +853,32 @@ const openTaskOptions = computed(() =>
     }),
 )
 
+const timeboxGoalOptions = computed(() =>
+  activeGoals.value
+    .filter((goal) => goal.status !== GoalStatus.CANCELLED)
+    .slice()
+    .sort((left, right) => left.title.localeCompare(right.title, 'zh-CN')),
+)
+
+const timeboxTaskOptions = computed(() => {
+  const goalId = timeboxForm.goalId
+  if (!goalId) return openTaskOptions.value
+  return tasksForGoalTree(goalId)
+    .filter((task) => task.status !== TaskStatus.CANCELLED)
+    .sort((left, right) => {
+      const leftDone = left.status === TaskStatus.COMPLETED ? 1 : 0
+      const rightDone = right.status === TaskStatus.COMPLETED ? 1 : 0
+      return leftDone - rightDone
+    })
+})
+
+function onTimeboxGoalChange(): void {
+  if (!timeboxForm.taskId) return
+  if (!timeboxTaskOptions.value.some((task) => task.id === timeboxForm.taskId)) {
+    timeboxForm.taskId = ''
+  }
+}
+
 function resetModal(): void {
   modalKind.value = null
   goalEditingId.value = null
@@ -868,10 +887,19 @@ function resetModal(): void {
   formError.value = ''
 }
 
-function openGoalCreate(parent?: Goal): void {
+function openGoalCreate(parent?: Goal, competencyId?: string): void {
   goalEditingId.value = null
   Object.assign(goalForm, emptyGoalForm())
-  if (parent) goalForm.parentGoalId = parent.id
+  if (parent) {
+    goalForm.parentGoalId = parent.id
+    goalForm.competencyId = parent.competencyId ?? ''
+  }
+  if (!goalForm.competencyId && competencyId && competencyMap.value[competencyId]) {
+    goalForm.competencyId = competencyId
+  }
+  if (!goalForm.competencyId && competencyFilter.value !== 'all') {
+    goalForm.competencyId = competencyFilter.value
+  }
   formError.value = ''
   modalKind.value = 'goal'
 }
@@ -888,14 +916,22 @@ function openGoalEdit(goal: Goal): void {
     priority: goal.priority,
     successCriteria: goal.successCriteria,
     status: goal.status,
-    progressMode: goal.progressMode,
+    progressMode:
+      goal.progressMode === ProgressMode.MILESTONE_BASED
+        ? ProgressMode.TASK_BASED
+        : goal.progressMode,
     manualProgress: goal.manualProgress,
     reviewFrequency: goal.reviewFrequency,
-    directionIds: [...(goalDirectionIds.value[goal.id] ?? [])],
-    milestoneIds: [...(goalMilestoneIds.value[goal.id] ?? [])],
+    competencyId: goal.competencyId ?? '',
   })
   formError.value = ''
   modalKind.value = 'goal'
+}
+
+function effectiveProgressMode(goal: Goal): ProgressMode {
+  return goal.progressMode === ProgressMode.MILESTONE_BASED
+    ? ProgressMode.TASK_BASED
+    : goal.progressMode
 }
 
 async function submitGoal(): Promise<void> {
@@ -911,21 +947,20 @@ async function submitGoal(): Promise<void> {
       description: goalForm.description.trim(),
       goalType: goalForm.goalType,
       parentGoalId: goalForm.parentGoalId || null,
+      competencyId: goalForm.competencyId || null,
       startDate: fromDateInput(goalForm.startDate),
       dueDate: fromDateInput(goalForm.dueDate),
       priority: goalForm.priority,
       successCriteria: goalForm.successCriteria.trim(),
       status: goalForm.status,
-      progressMode: goalForm.progressMode,
+      progressMode:
+        goalForm.progressMode === ProgressMode.MILESTONE_BASED
+          ? ProgressMode.TASK_BASED
+          : goalForm.progressMode,
       manualProgress: Math.max(0, Math.min(100, Number(goalForm.manualProgress) || 0)),
       reviewFrequency: goalForm.reviewFrequency.trim(),
     }
-    await saveGoal(
-      payload,
-      [...goalForm.directionIds],
-      [...goalForm.milestoneIds],
-      goalEditingId.value ?? undefined,
-    )
+    await saveGoal(payload, goalEditingId.value ?? undefined)
     const created = !goalEditingId.value
     resetModal()
     success(created ? '目标已创建' : '目标已更新')
@@ -939,8 +974,17 @@ async function submitGoal(): Promise<void> {
 function openTaskCreate(parent?: Task): void {
   taskEditingId.value = null
   Object.assign(taskForm, emptyTaskForm())
-  if (parent) taskForm.parentTaskId = parent.id
+  if (parent) {
+    taskForm.parentTaskId = parent.id
+    const inherited = keywordsForTask(parent.id)
+    taskForm.goalIds = [...inherited.goalIds]
+    taskForm.competencyIds = [...inherited.competencyIds]
+  }
   if (goalFilter.value !== 'all') taskForm.goalIds = [goalFilter.value]
+  if (!taskForm.competencyIds.length && goalFilter.value !== 'all') {
+    const competencyId = goalMap.value[goalFilter.value]?.competencyId
+    if (competencyId) taskForm.competencyIds = [competencyId]
+  }
   formError.value = ''
   modalKind.value = 'task'
 }
@@ -948,6 +992,7 @@ function openTaskCreate(parent?: Task): void {
 function openTaskForGoal(goal: Goal): void {
   openTaskCreate()
   taskForm.goalIds = [goal.id]
+  taskForm.competencyIds = goal.competencyId ? [goal.competencyId] : []
 }
 
 function openTaskEdit(task: Task): void {
@@ -1137,6 +1182,10 @@ function openTimeboxCreate(task?: Task, dayKey?: string): void {
   const selected = task ?? openTaskOptions.value[0]
   if (selected) {
     timeboxForm.taskId = selected.id
+    if (task) {
+      const linkedGoalId = (taskGoalIds.value[task.id] ?? [])[0]
+      if (linkedGoalId) timeboxForm.goalId = linkedGoalId
+    }
     const base = dayKey
       ? new Date(`${dayKey}T09:00:00`)
       : selected.scheduledDate
@@ -1157,6 +1206,7 @@ function openTimeboxCreate(task?: Task, dayKey?: string): void {
 function openTimeboxEdit(timebox: Timebox): void {
   timeboxEditingId.value = timebox.id
   Object.assign(timeboxForm, {
+    goalId: (taskGoalIds.value[timebox.taskId] ?? [])[0] ?? '',
     taskId: timebox.taskId,
     plannedStart: toDateTimeInput(timebox.plannedStart),
     plannedEnd: toDateTimeInput(timebox.plannedEnd),
@@ -1271,6 +1321,31 @@ function toggleGoalRelation(list: string[], id: string, event: Event): void {
 
 onMounted(async () => {
   await refresh()
+
+  const competencyParam = String(route.query.competency ?? '')
+  const linkedCompetency = competencyParam
+    ? competencies.value.find((item) => item.id === competencyParam && !item.archivedAt)
+    : undefined
+  if (competencyParam) {
+    if (linkedCompetency) {
+      competencyFilter.value = linkedCompetency.id
+      activeView.value = 'goals'
+    } else {
+      toastError('这个能力不存在或已经归档')
+    }
+  }
+
+  const goalParam = String(route.query.goal ?? '')
+  if (goalParam) {
+    const goal = goals.value.find((item) => item.id === goalParam)
+    if (goal) {
+      activeView.value = 'goals'
+      openGoalDetail(goal)
+    } else {
+      toastError('这个目标不存在或已经归档')
+    }
+  }
+
   const taskParam = String(route.query.task ?? '')
   if (taskParam) {
     const task = tasks.value.find((item) => item.id === taskParam)
@@ -1280,13 +1355,19 @@ onMounted(async () => {
     } else {
       toastError('这个任务不存在或已经归档')
     }
-    await router.replace('/goals')
-    return
   }
+
   const create = String(route.query.create ?? '')
-  if (create === 'task') openTaskCreate()
-  else if (create === 'goal') openGoalCreate()
-  if (create) await router.replace('/goals')
+  if (create === 'task') {
+    openTaskCreate()
+    if (linkedCompetency) taskForm.competencyIds = [linkedCompetency.id]
+  } else if (create === 'goal') {
+    openGoalCreate(undefined, linkedCompetency?.id)
+  }
+
+  if (competencyParam || goalParam || taskParam || create) {
+    await router.replace('/goals')
+  }
 })
 </script>
 
@@ -1297,7 +1378,7 @@ onMounted(async () => {
         <p class="page-eyebrow">执行与学习 · 目标与任务</p>
         <h2 class="page-title">目标与任务</h2>
         <p class="page-subtitle">
-          把里程碑拆成目标，再用 WBS、四象限和时间盒落到今天。任务可以独立存在，也可以支持多个目标。
+          从发展路线中的能力出发，逐层拆成目标、可执行任务，再为任务安排现实时间盒。
         </p>
       </div>
       <div class="header-actions">
@@ -1359,7 +1440,7 @@ onMounted(async () => {
           @click="activeView = 'goals'"
         >
           <AppIcon name="target" :size="15" />
-          目标
+          目标拆解
           <span class="tab-count">{{ visibleGoals.length }}</span>
         </button>
         <button
@@ -1372,16 +1453,6 @@ onMounted(async () => {
           <AppIcon name="layers" :size="15" />
           任务
           <span class="tab-count">{{ visibleTasks.length }}</span>
-        </button>
-        <button
-          class="view-tab"
-          :class="{ active: activeView === 'quadrants' }"
-          role="tab"
-          :aria-selected="activeView === 'quadrants'"
-          @click="activeView = 'quadrants'"
-        >
-          <AppIcon name="dashboard" :size="15" />
-          四象限
         </button>
         <button
           class="view-tab"
@@ -1398,7 +1469,7 @@ onMounted(async () => {
 
       <div class="toolbar-actions">
         <select
-          v-if="activeView === 'tasks' || activeView === 'quadrants'"
+          v-if="activeView === 'tasks'"
           v-model="goalFilter"
           class="select goal-filter"
           aria-label="按目标筛选任务"
@@ -1440,7 +1511,7 @@ onMounted(async () => {
               目标拆解
             </h3>
             <p class="section-note">
-              进度由任务权重、里程碑完成度或人工评估计算，不重复保存。
+              从能力锚点逐层拆到可执行任务。能直接写任务时就停止拆解，进度按任务完成度计算。
             </p>
           </div>
           <div class="row">
@@ -1469,10 +1540,30 @@ onMounted(async () => {
           </div>
         </div>
 
+        <div class="goal-filter-bar" aria-label="目标能力筛选">
+          <span>
+            <AppIcon name="layers" :size="14" />
+            能力锚点
+          </span>
+          <select v-model="competencyFilter" class="select goal-filter">
+            <option value="all">全部能力</option>
+            <option v-for="competency in competencyOptions" :key="competency.id" :value="competency.id">
+              {{ competencyPath(competency.id) }}
+            </option>
+          </select>
+          <button
+            v-if="competencyFilter !== 'all'"
+            class="link-btn"
+            @click="competencyFilter = 'all'"
+          >
+            清除筛选
+          </button>
+        </div>
+
         <EmptyState
-          v-if="visibleGoals.length === 0"
+          v-if="displayedGoals.length === 0"
           title="还没有目标"
-          description="目标描述要实现的成果。可以从一个里程碑出发，先写清楚验收标准。"
+          description="先选择一个能力作为锚点，再把能力拆成有验收标准的目标。"
         >
           <button class="btn btn-sm btn-secondary" @click="openGoalCreate()">创建第一个目标</button>
         </EmptyState>
@@ -1483,9 +1574,8 @@ onMounted(async () => {
             拖动目标到另一个目标上可调整层级，拖到空白区域回到顶层。点击标题查看详情。
           </p>
           <div class="goal-tree-body" @dragover.prevent @drop.prevent="dropGoalToRoot">
+            <template v-for="row in goalTreeRows" :key="row.goal.id">
             <div
-              v-for="row in goalTreeRows"
-              :key="row.goal.id"
               class="goal-tree-row"
               :class="{
                 archived: row.goal.archivedAt,
@@ -1520,11 +1610,24 @@ onMounted(async () => {
                 <span class="goal-tree-title">{{ row.goal.title }}</span>
                 <span class="badge badge-accent">{{ goalTypeLabels[row.goal.goalType] }}</span>
                 <span class="badge">{{ goalStatusLabels[row.goal.status] }}</span>
+                <span v-if="row.goal.competencyId" class="badge goal-capability-badge">
+                  {{ competencyPath(row.goal.competencyId) }}
+                </span>
                 <span v-if="row.goal.archivedAt" class="badge badge-amber">已归档</span>
                 <span class="goal-tree-meta">
                   {{ progressForGoal(row.goal) }}% ·
-                  {{ goalTaskStats[row.goal.id]?.done ?? 0 }}/{{ goalTaskStats[row.goal.id]?.total ?? 0 }}
-                  任务
+                  <button
+                    class="goal-task-toggle"
+                    :class="{ open: expandedGoalTaskIds.has(row.goal.id) }"
+                    :aria-expanded="expandedGoalTaskIds.has(row.goal.id)"
+                    :aria-label="expandedGoalTaskIds.has(row.goal.id) ? '收起任务' : '展开任务'"
+                    @click.stop="toggleGoalTasks(row.goal.id)"
+                  >
+                    {{ goalTaskStats[row.goal.id]?.done ?? 0 }}/{{ goalTaskStats[row.goal.id]?.total ?? 0 }}
+                    任务
+                    <AppIcon name="arrow-right" :size="11" />
+                  </button>
+                  · {{ goalChildCounts[row.goal.id] ?? 0 }} 子目标
                 </span>
               </div>
               <div class="goal-tree-progress" :title="`进度 ${progressForGoal(row.goal)}%`">
@@ -1533,6 +1636,24 @@ onMounted(async () => {
                 </span>
               </div>
               <div class="goal-actions">
+                <button
+                  v-if="!row.goal.archivedAt"
+                  class="icon-btn"
+                  title="添加子目标"
+                  aria-label="添加子目标"
+                  @click.stop="openGoalCreate(row.goal, row.goal.competencyId ?? undefined)"
+                >
+                  <AppIcon name="plus" :size="13" />
+                </button>
+                <button
+                  v-if="!row.goal.archivedAt"
+                  class="icon-btn"
+                  title="添加任务"
+                  aria-label="添加任务"
+                  @click.stop="openTaskForGoal(row.goal)"
+                >
+                  <AppIcon name="check" :size="13" />
+                </button>
                 <button
                   v-if="!row.goal.archivedAt"
                   class="icon-btn"
@@ -1552,13 +1673,39 @@ onMounted(async () => {
                 </button>
               </div>
             </div>
+            <div
+              v-if="expandedGoalTaskIds.has(row.goal.id)"
+              class="goal-tree-tasks"
+              :style="{ '--depth': row.depth }"
+            >
+              <button
+                v-for="task in tasksForGoal(row.goal.id)"
+                :key="task.id"
+                class="goal-tree-task"
+                @click="openTaskDetail(task)"
+              >
+                <span
+                  class="goal-task-check"
+                  :class="{ done: task.status === TaskStatus.COMPLETED }"
+                />
+                <span class="goal-task-title">{{ task.title }}</span>
+                <span class="badge">{{ taskStatusLabels[task.status] }}</span>
+                <span v-if="task.estimatedDuration" class="goal-task-duration">
+                  {{ formatDuration(task.estimatedDuration) }}
+                </span>
+              </button>
+              <p v-if="tasksForGoal(row.goal.id).length === 0" class="goal-tree-task-empty">
+                还没有任务，点右侧 ✓ 添加。
+              </p>
+            </div>
+            </template>
           </div>
-          <p v-if="goalTreeRows.length === 0" class="goal-tree-empty">当前筛选下没有目标。</p>
+          <p v-if="goalTreeRows.length === 0" class="goal-tree-empty">当前能力下没有目标。</p>
         </div>
 
         <div v-else class="goal-grid">
           <article
-            v-for="goal in visibleGoals"
+            v-for="goal in displayedGoals"
             :key="goal.id"
             class="goal-card card"
             :class="{ archived: goal.archivedAt }"
@@ -1603,7 +1750,7 @@ onMounted(async () => {
 
             <div class="goal-progress">
               <div class="progress-head">
-                <span>进度 · {{ progressModeLabels[goal.progressMode] }}</span>
+                <span>进度 · {{ progressModeLabels[effectiveProgressMode(goal)] }}</span>
                 <strong>{{ progressForGoal(goal) }}%</strong>
               </div>
               <div class="progress-track">
@@ -1622,27 +1769,29 @@ onMounted(async () => {
                 {{ goalTaskStats[goal.id]?.total ?? 0 }} 任务
               </span>
               <span>
-                <AppIcon name="flag" :size="11" />
-                {{ goalMilestoneIds[goal.id]?.length ?? 0 }} 里程碑
+                <AppIcon name="layers" :size="11" />
+                {{ goalChildCounts[goal.id] ?? 0 }} 子目标
               </span>
             </div>
 
-            <div v-if="(goalDirectionIds[goal.id]?.length ?? 0) > 0" class="goal-tags">
-              <span
-                v-for="directionId in goalDirectionIds[goal.id]"
-                :key="directionId"
-                class="goal-tag"
-                :style="{ '--tag-color': directionMap[directionId]?.color ?? '#2f6049' }"
-              >
+            <div v-if="goal.competencyId" class="goal-tags">
+              <button class="goal-tag goal-tag-button" @click="filterByCompetency(goal.competencyId)">
                 <span class="tag-dot" />
-                {{ directionMap[directionId]?.name ?? '未知方向' }}
-              </span>
+                {{ competencyPath(goal.competencyId) || '未知能力' }}
+              </button>
             </div>
 
             <div class="goal-foot">
               <button class="link-btn" @click="viewTasksOfGoal(goal.id)">
                 查看关联任务
                 <AppIcon name="arrow-right" :size="12" />
+              </button>
+              <button
+                v-if="!goal.archivedAt"
+                class="link-btn"
+                @click="openGoalCreate(goal, goal.competencyId ?? undefined)"
+              >
+                添加子目标
               </button>
             </div>
           </article>
@@ -1761,88 +1910,6 @@ onMounted(async () => {
               <p v-if="column.tasks.length === 0" class="kanban-empty">拖任务到这里</p>
             </div>
           </section>
-        </div>
-      </section>
-
-      <section v-else-if="activeView === 'quadrants'" class="quadrant-view">
-        <div class="quadrant-hint">
-          <AppIcon name="dashboard" :size="14" />
-          重要程度与紧急程度分别存储，象限由系统计算。没有对长期方向有贡献的任务，通常会落在 Q3 或 Q4。
-        </div>
-        <div class="quadrant-grid">
-          <article
-            v-for="quadrant in quadrantMeta"
-            :key="quadrant.key"
-            class="quadrant-card card"
-            :class="`quadrant-${quadrant.key}`"
-            @dragover.prevent
-            @drop.prevent="dropTaskToQuadrant(quadrant.key)"
-          >
-            <header class="quadrant-head">
-              <div>
-                <span class="quadrant-code">{{ quadrant.code }}</span>
-                <h4>{{ quadrant.title }}</h4>
-              </div>
-              <span class="quadrant-count">{{ quadrants[quadrant.key].length }}</span>
-            </header>
-            <p class="quadrant-action">{{ quadrant.action }}</p>
-            <p class="quadrant-note">{{ quadrant.note }}</p>
-
-            <div v-if="quadrants[quadrant.key].length === 0" class="quadrant-empty">
-              当前没有任务，可从其他象限拖入，或编辑任务的重要/紧急程度
-            </div>
-            <ul v-else class="quadrant-tasks">
-              <li
-                v-for="(task, index) in quadrants[quadrant.key]"
-                :key="task.id"
-                class="quadrant-task-row"
-                draggable="true"
-                :class="{ dragging: quadrantDragId === task.id }"
-                @dragstart="startQuadrantDrag(task, $event)"
-                @dragend="quadrantDragId = null"
-              >
-                <button
-                  class="quadrant-task"
-                  @click="openTaskDetail(task)"
-                >
-                  <span class="qt-title">{{ task.title }}</span>
-                  <span class="qt-meta">
-                    {{ taskTypeLabels[task.taskType] }}
-                    <span v-if="task.dueDate">· {{ relativeDay(task.dueDate) }}</span>
-                    <span v-if="taskGoalIds[task.id]?.length" class="qt-goal">· 关联目标</span>
-                  </span>
-                </button>
-                <div class="quadrant-task-actions">
-                  <button
-                    class="icon-btn"
-                    :disabled="index === 0"
-                    title="象限内上移"
-                    aria-label="象限内上移"
-                    @click="moveQuadrantTask(task, 'up')"
-                  >
-                    <AppIcon name="arrow-up" :size="12" />
-                  </button>
-                  <button
-                    class="icon-btn"
-                    :disabled="index === quadrants[quadrant.key].length - 1"
-                    title="象限内下移"
-                    aria-label="象限内下移"
-                    @click="moveQuadrantTask(task, 'down')"
-                  >
-                    <AppIcon name="arrow-down" :size="12" />
-                  </button>
-                  <button
-                    class="icon-btn"
-                    title="编辑重要/紧急程度"
-                    aria-label="编辑重要/紧急程度"
-                    @click="openTaskEdit(task)"
-                  >
-                    <AppIcon name="sliders" :size="12" />
-                  </button>
-                </div>
-              </li>
-            </ul>
-          </article>
         </div>
       </section>
 
@@ -2258,44 +2325,20 @@ onMounted(async () => {
         </div>
 
         <div class="field">
-          <span class="field-label">关联发展方向</span>
-          <div v-if="directionOptions.length === 0" class="relation-empty">还没有发展方向。</div>
-          <div v-else class="chip-check-list">
-            <label
-              v-for="direction in directionOptions"
-              :key="direction.id"
-              class="chip-check"
-              :class="{ selected: goalForm.directionIds.includes(direction.id) }"
+          <label class="field-label" for="goal-competency">主能力</label>
+          <select id="goal-competency" v-model="goalForm.competencyId" class="select">
+            <option value="">暂不关联能力</option>
+            <option
+              v-for="competency in competencyOptions"
+              :key="competency.id"
+              :value="competency.id"
             >
-              <input
-                type="checkbox"
-                :checked="goalForm.directionIds.includes(direction.id)"
-                @change="toggleGoalRelation(goalForm.directionIds, direction.id, $event)"
-              />
-              <span class="chip-dot" :style="{ background: direction.color }" />
-              {{ direction.name }}
-            </label>
-          </div>
-        </div>
-
-        <div class="field">
-          <span class="field-label">关联里程碑</span>
-          <div v-if="milestoneOptions.length === 0" class="relation-empty">还没有里程碑。</div>
-          <div v-else class="chip-check-list">
-            <label
-              v-for="milestone in milestoneOptions"
-              :key="milestone.id"
-              class="chip-check"
-              :class="{ selected: goalForm.milestoneIds.includes(milestone.id) }"
-            >
-              <input
-                type="checkbox"
-                :checked="goalForm.milestoneIds.includes(milestone.id)"
-                @change="toggleGoalRelation(goalForm.milestoneIds, milestone.id, $event)"
-              />
-              {{ milestone.name }}
-            </label>
-          </div>
+              {{ competencyPath(competency.id) }}
+            </option>
+          </select>
+          <span class="field-hint">
+            能力是拆解锚点。目标可继续添加子目标，直到能直接添加可执行任务。
+          </span>
         </div>
 
         <p v-if="formError" class="form-error">{{ formError }}</p>
@@ -2396,25 +2439,6 @@ onMounted(async () => {
             </select>
           </div>
           <div class="field">
-            <label class="field-label" for="task-importance">重要性</label>
-            <select id="task-importance" v-model="taskForm.importance" class="select">
-              <option v-for="importance in importances" :key="importance" :value="importance">
-                {{ importanceLabels[importance] }}
-              </option>
-            </select>
-          </div>
-        </div>
-
-        <div class="form-grid">
-          <div class="field">
-            <label class="field-label" for="task-urgency">紧急程度</label>
-            <select id="task-urgency" v-model="taskForm.urgency" class="select">
-              <option v-for="urgency in urgencies" :key="urgency" :value="urgency">
-                {{ urgencyLabels[urgency] }}
-              </option>
-            </select>
-          </div>
-          <div class="field">
             <label class="field-label">实际耗时</label>
             <input class="input" :value="formatDuration(tasks.find((task) => task.id === taskEditingId)?.actualDuration ?? 0)" readonly />
           </div>
@@ -2489,13 +2513,31 @@ onMounted(async () => {
     >
       <form class="form" @submit.prevent="submitTimebox">
         <div class="field">
+          <label class="field-label" for="timebox-goal">关联目标</label>
+          <select
+            id="timebox-goal"
+            v-model="timeboxForm.goalId"
+            class="select"
+            @change="onTimeboxGoalChange"
+          >
+            <option value="">全部目标</option>
+            <option v-for="goal in timeboxGoalOptions" :key="goal.id" :value="goal.id">
+              {{ goal.title }}
+            </option>
+          </select>
+          <span class="field-hint">选择目标后，任务列表只显示该目标及其子目标下的任务。</span>
+        </div>
+        <div class="field">
           <label class="field-label" for="timebox-task">任务</label>
           <select id="timebox-task" v-model="timeboxForm.taskId" class="select">
             <option value="" disabled>请选择任务</option>
-            <option v-for="task in openTaskOptions" :key="task.id" :value="task.id">
+            <option v-for="task in timeboxTaskOptions" :key="task.id" :value="task.id">
               {{ task.title }}
             </option>
           </select>
+          <span v-if="timeboxForm.goalId && timeboxTaskOptions.length === 0" class="field-hint">
+            这个目标下还没有可安排的任务，先到目标拆解里添加任务。
+          </span>
         </div>
         <div class="form-grid">
           <div class="field">
@@ -2640,7 +2682,7 @@ onMounted(async () => {
       :title="detailGoal?.title ?? '目标详情'"
       :subtitle="
         detailGoal
-          ? `${goalTypeLabels[detailGoal.goalType]} · ${progressModeLabels[detailGoal.progressMode]}`
+          ? `${goalTypeLabels[detailGoal.goalType]} · ${progressModeLabels[effectiveProgressMode(detailGoal)]}`
           : ''
       "
       :width="480"
@@ -2658,7 +2700,7 @@ onMounted(async () => {
 
         <div class="detail-block">
           <div class="detail-block-head">
-            <span>进度 · {{ progressModeLabels[detailGoal.progressMode] }}</span>
+            <span>进度 · {{ progressModeLabels[effectiveProgressMode(detailGoal)] }}</span>
             <strong>{{ progressForGoal(detailGoal) }}%</strong>
           </div>
           <div class="progress-track">
@@ -2666,7 +2708,9 @@ onMounted(async () => {
           </div>
           <p class="detail-hint">
             {{ goalTaskStats[detailGoal.id]?.done ?? 0 }} /
-            {{ goalTaskStats[detailGoal.id]?.total ?? 0 }} 个关联任务已完成
+            {{ goalTaskStats[detailGoal.id]?.total ?? 0 }} 个关联任务已完成{{
+              detailGoalChildren.length ? '（含子目标）' : ''
+            }}
           </p>
         </div>
 
@@ -2699,27 +2743,32 @@ onMounted(async () => {
           </dl>
         </div>
 
-        <div v-if="(goalDirectionIds[detailGoal.id]?.length ?? 0) > 0" class="detail-block">
-          <h4 class="detail-block-title">关联方向</h4>
-          <div class="goal-tags">
-            <span
-              v-for="directionId in goalDirectionIds[detailGoal.id]"
-              :key="directionId"
-              class="goal-tag"
-              :style="{ '--tag-color': directionMap[directionId]?.color ?? '#3563e9' }"
-            >
-              <span class="tag-dot" />
-              {{ directionMap[directionId]?.name ?? '未知方向' }}
-            </span>
-          </div>
+        <div class="detail-block">
+          <h4 class="detail-block-title">主能力</h4>
+          <button
+            v-if="detailGoal.competencyId"
+            class="goal-tag goal-tag-button"
+            @click="filterByCompetency(detailGoal.competencyId)"
+          >
+            <span class="tag-dot" />
+            {{ competencyPath(detailGoal.competencyId) }}
+            <AppIcon name="arrow-right" :size="12" />
+          </button>
+          <p v-else class="detail-empty">还没有关联能力，可编辑目标补上拆解锚点。</p>
         </div>
 
-        <div v-if="detailGoalMilestones.length > 0" class="detail-block">
-          <h4 class="detail-block-title">关联里程碑</h4>
-          <ul class="detail-pill-list">
-            <li v-for="name in detailGoalMilestones" :key="name">
-              <AppIcon name="flag" :size="12" />
-              {{ name }}
+        <div v-if="detailGoalChildren.length > 0" class="detail-block">
+          <h4 class="detail-block-title">
+            子目标
+            <span class="detail-count">{{ detailGoalChildren.length }}</span>
+          </h4>
+          <ul class="detail-task-list">
+            <li v-for="child in detailGoalChildren" :key="child.id">
+              <button class="detail-task-row" @click="openGoalDetail(child)">
+                <span class="detail-task-title">{{ child.title }}</span>
+                <span class="badge">{{ goalStatusLabels[child.status] }}</span>
+                <AppIcon name="arrow-right" :size="12" />
+              </button>
             </li>
           </ul>
         </div>
@@ -2743,7 +2792,9 @@ onMounted(async () => {
         </div>
       </template>
       <template #footer>
+        <button class="btn btn-sm btn-secondary" @click="addChildGoalForDetail">添加子目标</button>
         <button class="btn btn-sm btn-secondary" @click="addTaskForDetailGoal">添加任务</button>
+        <button class="btn btn-sm btn-secondary" @click="timeboxForDetailGoal">安排时间盒</button>
         <button class="btn btn-sm btn-secondary" @click="editGoalFromDetail">编辑目标</button>
         <button
           class="btn btn-sm"
@@ -2771,8 +2822,6 @@ onMounted(async () => {
           <span class="badge badge-accent">{{ taskTypeLabels[detailTask.taskType] }}</span>
           <span class="badge">{{ taskStatusLabels[detailTask.status] }}</span>
           <span class="badge">{{ priorityLabels[detailTask.priority] }}</span>
-          <span class="badge">{{ importanceLabels[detailTask.importance] }}</span>
-          <span class="badge">{{ urgencyLabels[detailTask.urgency] }}</span>
           <span v-if="detailTask.archivedAt" class="badge badge-amber">已归档</span>
         </div>
 
@@ -3192,168 +3241,6 @@ onMounted(async () => {
   flex-direction: column;
 }
 
-.quadrant-hint {
-  display: flex;
-  align-items: flex-start;
-  gap: 7px;
-  padding: 10px 13px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-muted);
-  color: var(--ink-faint);
-  font-size: 11px;
-  line-height: 1.65;
-}
-
-.quadrant-hint .icon {
-  flex: none;
-  margin-top: 1px;
-  color: var(--accent);
-}
-
-.quadrant-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.quadrant-card {
-  padding: 16px;
-}
-
-.quadrant-q1 {
-  border-top: 3px solid var(--danger);
-}
-
-.quadrant-q2 {
-  border-top: 3px solid var(--accent);
-}
-
-.quadrant-q3 {
-  border-top: 3px solid var(--amber);
-}
-
-.quadrant-q4 {
-  border-top: 3px solid var(--line-strong);
-}
-
-.quadrant-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.quadrant-code {
-  font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0.1em;
-  color: var(--muted);
-}
-
-.quadrant-head h4 {
-  font-family: var(--font-serif);
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.quadrant-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 24px;
-  height: 24px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-muted);
-  color: var(--ink-faint);
-  font-family: var(--font-mono);
-  font-size: 10px;
-}
-
-.quadrant-action {
-  margin-top: 3px;
-  font-size: 10.5px;
-  font-weight: 600;
-  color: var(--accent);
-}
-
-.quadrant-note {
-  margin-top: 2px;
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.6;
-}
-
-.quadrant-empty {
-  margin-top: 11px;
-  padding: 14px 0 4px;
-  border-top: 1px dashed var(--line);
-  color: var(--muted);
-  font-size: 10.5px;
-}
-
-.quadrant-tasks {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  margin-top: 10px;
-}
-
-.quadrant-task {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  width: 100%;
-  padding: 8px 9px;
-  border: 1px solid var(--line-faint);
-  border-radius: var(--radius-sm);
-  background: var(--surface-muted);
-  text-align: left;
-  transition:
-    border-color 0.16s ease,
-    background-color 0.16s ease;
-}
-
-.quadrant-task:hover {
-  border-color: var(--line-strong);
-  background: var(--surface);
-}
-
-.quadrant-task-row {
-  display: flex;
-  align-items: stretch;
-  gap: 4px;
-}
-
-.quadrant-task-row .quadrant-task {
-  flex: 1;
-}
-
-.quadrant-task-actions {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 2px;
-  flex: none;
-}
-
-.quadrant-task-actions .icon-btn {
-  width: 24px;
-  height: 21px;
-}
-
-.qt-title {
-  font-size: 11.5px;
-  font-weight: 550;
-}
-
-.qt-meta {
-  font-size: 9.5px;
-  color: var(--muted);
-}
-
-.qt-goal {
-  color: var(--accent);
-}
 
 .timebox-groups {
   display: flex;
@@ -3772,6 +3659,85 @@ onMounted(async () => {
   height: 5px;
 }
 
+.goal-task-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--muted);
+  font-size: inherit;
+  font-weight: 600;
+}
+
+.goal-task-toggle:hover {
+  color: var(--accent-strong);
+}
+
+.goal-task-toggle .icon {
+  transition: transform 0.16s ease;
+}
+
+.goal-task-toggle.open .icon {
+  transform: rotate(90deg);
+}
+
+.goal-tree-tasks {
+  display: grid;
+  gap: 4px;
+  padding: 6px 10px 8px calc(32px + var(--depth, 0) * 22px);
+}
+
+.goal-tree-task {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--line-faint);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  text-align: left;
+}
+
+.goal-tree-task:hover {
+  border-color: var(--line-strong);
+}
+
+.goal-task-check {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--line-strong);
+  border-radius: 50%;
+}
+
+.goal-task-check.done {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.goal-task-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.goal-task-duration {
+  flex: none;
+  margin-left: auto;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.goal-tree-task-empty {
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
 .goal-tree-empty {
   padding: 12px 2px 2px;
   color: var(--muted);
@@ -3926,14 +3892,7 @@ onMounted(async () => {
   text-align: center;
 }
 
-/* ---------- 四象限拖拽 ---------- */
-.quadrant-card {
-  transition: border-color 0.16s ease, box-shadow 0.16s ease;
-}
 
-.quadrant-task-row.dragging {
-  opacity: 0.45;
-}
 
 /* ---------- 日 / 周 / 月时间盒 ---------- */
 .period-nav {
@@ -4429,8 +4388,7 @@ onMounted(async () => {
 }
 
 @media (max-width: 1100px) {
-  .goal-grid,
-  .quadrant-grid {
+  .goal-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 }

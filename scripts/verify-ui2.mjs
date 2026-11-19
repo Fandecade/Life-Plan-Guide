@@ -146,7 +146,7 @@ try {
   await waitText(page, '今日日历')
   await waitText(page, '时间盒')
   await waitText(page, '今日任务')
-  pass('日历入口抽屉', '时间盒、今日任务与里程碑')
+  pass('日历入口抽屉', '时间盒与今日任务')
   await clickText(page, '.drawer-foot button', '打开时间盒')
   await page.waitForFunction(() => location.pathname === '/goals', { timeout: 10000 })
   await page.waitForFunction(() => !document.querySelector('.drawer-panel'), {

@@ -183,8 +183,16 @@ try {
   await setSelect(page, '#goal-priority', 'HIGH')
   await setInput(page, '#goal-due', dateKey(45))
   await setInput(page, '#goal-criteria', '原型可演示，完成 5 位用户测试并形成改进清单。')
-  await toggleChip(page, '软硬件全栈工程', true)
-  await toggleChip(page, '完成一个嵌入式 Linux 小项目', true)
+  const goalCompetencyValue = await page.evaluate(() => {
+    const select = document.querySelector('#goal-competency')
+    if (!select) return ''
+    const option = Array.from(select.options).find((item) =>
+      (item.textContent ?? '').includes('SAT 与局部搜索'),
+    )
+    return option?.value ?? ''
+  })
+  assert(goalCompetencyValue, '主能力下拉缺少 SAT 与局部搜索')
+  await setSelect(page, '#goal-competency', goalCompetencyValue)
   await clickText(page, '.modal-actions button', '创建目标')
   await waitText(page, '目标已创建', 15000)
   await waitModalClosed(page)
@@ -192,9 +200,8 @@ try {
   const newGoalCard = await page.$$eval('.goal-card', (nodes) =>
     nodes.find((node) => (node.textContent ?? '').includes('完成产品原型并验证需求'))?.textContent ?? '',
   )
-  assert(newGoalCard.includes('1 里程碑'), '目标与里程碑关联未保存')
-  assert(newGoalCard.includes('软硬件全栈工程'), '目标与方向关联未保存')
-  pass('创建目标', '关联方向与里程碑')
+  assert(newGoalCard.includes('SAT 与局部搜索'), '目标与主能力关联未保存')
+  pass('创建目标', '关联主能力 SAT 与局部搜索')
 
   await clickGoalAction(page, '完成产品原型并验证需求', '编辑目标')
   await page.waitForSelector('#goal-progress-mode', { timeout: 8000 })
@@ -223,8 +230,7 @@ try {
   await setSelect(page, '#task-type', 'OUTPUT')
   await setSelect(page, '#task-status', 'TODO')
   await setSelect(page, '#task-priority', 'HIGH')
-  await setSelect(page, '#task-importance', 'IMPORTANT')
-  await setSelect(page, '#task-urgency', 'HIGH')
+
   await setInput(page, '#task-scheduled', dateKey(0))
   await setInput(page, '#task-due', dateKey(2))
   await setInput(page, '#task-estimate', '45')
@@ -242,8 +248,7 @@ try {
   await setInput(page, '#task-title', '整理用户访谈记录')
   await setInput(page, '#task-desc', '整理 5 位用户的访谈记录并标注主题。')
   await setSelect(page, '#task-type', 'OUTPUT')
-  await setSelect(page, '#task-importance', 'IMPORTANT')
-  await setSelect(page, '#task-urgency', 'MEDIUM')
+
   await setInput(page, '#task-estimate', '30')
   await setInput(page, '#task-criteria', '形成主题编码表和关键引用。')
   await clickText(page, '.modal-actions button', '创建任务')
@@ -301,15 +306,13 @@ try {
   await waitText(page, '1 个前置')
   pass('任务依赖', '前置任务被保存并显示')
 
-  await clickText(page, '.view-tab', '四象限')
-  await page.waitForSelector('.quadrant-grid', { timeout: 8000 })
-  const q1Text = await page.$eval('.quadrant-q1', (node) => node.textContent ?? '')
-  const q2Text = await page.$eval('.quadrant-q2', (node) => node.textContent ?? '')
-  const q4Text = await page.$eval('.quadrant-q4', (node) => node.textContent ?? '')
-  assert(q1Text.includes('阅读 SAT 局部搜索论文'), 'Q1 缺少重要且紧急任务')
-  assert(q2Text.includes('白纸输出算法流程'), 'Q2 缺少重要但不紧急任务')
-  assert(q4Text.includes('复习：蚁群算法'), 'Q4 缺少不重要不紧急任务')
-  pass('四象限计算', '重要性 × 紧急程度独立存储')
+  await clickText(page, '.seg-btn', '看板')
+  await page.waitForSelector('.kanban-board', { timeout: 8000 })
+  const kanbanColumns = await page.$$eval('.kanban-column', (nodes) => nodes.length)
+  assert(kanbanColumns === 3, `看板应有 3 列，实际 ${kanbanColumns}`)
+  await waitText(page, '拆解用户需求')
+  pass('任务看板视图', '3 列状态视图，任务上下文保留')
+  await clickText(page, '.seg-btn', 'WBS')
 
   await clickText(page, '.view-tab', '时间盒')
   await page.waitForSelector('.timebox-card', { timeout: 8000 })
@@ -317,6 +320,25 @@ try {
   assert(initialGroups === 1, `初始时间盒分组应为 1，实际 ${initialGroups}`)
 
   await clickText(page, '.timebox-card button', '安排时间盒')
+  await page.waitForSelector('#timebox-goal', { timeout: 8000 })
+  const goalOption = await page.$$eval('#timebox-goal option', (options) => {
+    const option = options.find((item) => (item.textContent ?? '').includes('掌握 ACO'))
+    return option ? option.value : ''
+  })
+  assert(goalOption, '时间盒目标选项缺少 ACO 目标')
+  await setSelect(page, '#timebox-goal', goalOption)
+  await page.waitForFunction(
+    () => (document.querySelector('#timebox-task')?.options.length ?? 0) > 1,
+    { timeout: 8000 },
+  )
+  const filteredTaskOptions = await page.$$eval('#timebox-task option', (options) =>
+    options.map((item) => item.textContent.trim()).filter(Boolean),
+  )
+  assert(
+    filteredTaskOptions.some((text) => text.includes('阅读 SAT')),
+    '按目标筛选后缺少阅读任务',
+  )
+  pass('时间盒按目标筛选任务', '选择 ACO 目标后任务范围收敛')
   await page.waitForSelector('#timebox-task', { timeout: 8000 })
   const taskOptions = await page.$$eval('#timebox-task option', (options) =>
     options.map((option) => ({ value: option.value, text: option.textContent.trim() })),

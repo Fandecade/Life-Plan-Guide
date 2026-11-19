@@ -82,20 +82,25 @@ try {
     directions: document.querySelectorAll('.direction-card').length,
     openTrees: document.querySelectorAll('.direction-body').length,
     abilityNodes: document.querySelectorAll('.ability-node').length,
-    timelineNodes: document.querySelectorAll('.s-timeline-node').length,
-    snakeMode: document.querySelector('.s-timeline-board')?.getAttribute('data-timeline-mode'),
+    legacyNodes: document.querySelectorAll('.s-timeline-node, .ability-milestone').length,
+    flow: (document.querySelector('.roadmap-flow')?.textContent ?? '').replace(/\s+/g, ''),
   }))
   assert(initialRoadmap.directions >= 2, `发展方向不足：${initialRoadmap.directions}`)
   assert(initialRoadmap.openTrees === 0, `路线图默认不应展开能力树，实际 ${initialRoadmap.openTrees}`)
   assert(initialRoadmap.abilityNodes === 0, `默认不应显示能力节点，实际 ${initialRoadmap.abilityNodes}`)
-  assert(initialRoadmap.timelineNodes >= 2, `S 型时间线节点不足：${initialRoadmap.timelineNodes}`)
-  assert(initialRoadmap.snakeMode === 'snake', '总时间线未启用 S 型排布')
-  pass('克制默认视图', `${initialRoadmap.directions} 个方向折叠 · ${initialRoadmap.timelineNodes} 个时间节点`)
+  assert(initialRoadmap.legacyNodes === 0, '路线图仍残留里程碑或时间线节点')
+  assert(
+    initialRoadmap.flow.includes('发展方向') &&
+      initialRoadmap.flow.includes('能力') &&
+      initialRoadmap.flow.includes('时间盒'),
+    `规划链路说明不正确：${initialRoadmap.flow}`,
+  )
+  pass('克制默认视图', `${initialRoadmap.directions} 个方向折叠，已移除里程碑与时间线`)
 
-  await page.click('.direction-card:first-of-type .direction-summary')
-  await page.waitForSelector('.direction-card:first-of-type .ability-node', { timeout: 8000 })
+  await clickText(page, '.direction-summary', '研究生学业与科研')
+  await page.waitForSelector('.direction-card .ability-node', { timeout: 8000 })
   const treeNodeCount = await page.$$eval(
-    '.direction-card:first-of-type .ability-node',
+    '.direction-card .ability-node',
     (nodes) => nodes.length,
   )
   const detailCountBefore = await page.$$eval('.ability-detail', (nodes) => nodes.length)
@@ -126,103 +131,52 @@ try {
     ),
     { timeout: 8000 },
   )
-  await findAbilityButton('SAT 与局部搜索', '.ability-expand')
-  await page.waitForSelector('.ability-milestone', { timeout: 8000 })
-  const linkedMilestoneText = await page.$eval(
-    '.ability-milestone',
-    (node) => (node.textContent ?? '').trim(),
-  )
-  assert(linkedMilestoneText.includes('独立完成 SAT 算法复现实验'), '能力节点下未显示关联里程碑')
-  pass('能力与里程碑融合', '展开能力后同时显示里程碑和对应时间节点')
+  pass('能力树逐层展开', '算法与数据结构 → SAT 与局部搜索')
 
   await findAbilityButton('SAT 与局部搜索')
   await page.waitForSelector('.drawer-panel', { timeout: 8000 })
-  await waitText(page, '成长曲线')
   await waitText(page, '评价标准')
-  await waitText(page, '关联发展方向')
-  const growthSvg = await page.$$eval('.growth-svg', (nodes) => nodes.length)
-  assert(growthSvg === 1, '能力详情未渲染成长曲线')
-  pass('能力节点详情', '等级、评价标准、方向与成长曲线')
-  await closeDrawer(page)
+  await waitText(page, '所属方向')
+  await waitText(page, '下一步')
+  const legacyDrawer = await page.evaluate(
+    () => document.querySelectorAll('.milestone-detail-grid, .s-timeline-node').length,
+  )
+  assert(legacyDrawer === 0, '能力详情仍包含里程碑或时间线区块')
+  pass('能力节点详情', '等级、评价标准、方向与下一步拆解入口')
 
-  await setSelect(page, 'select[aria-label="时间线方向范围"]', await page.$eval(
-    'select[aria-label="时间线方向范围"] option:nth-child(2)',
-    (element) => element.value,
-  ))
-  await page.waitForFunction(
-    () => document.querySelectorAll('.s-timeline-node').length === 1,
-    { timeout: 8000 },
+  await clickText(page, '.ability-decompose-panel button', '拆解为目标')
+  await page.waitForFunction(() => location.pathname === '/goals', { timeout: 10000 })
+  await page.waitForSelector('.goal-tree', { timeout: 8000 })
+  const linkedFilter = await page.$eval(
+    '.goal-filter-bar select',
+    (element) => element.selectedOptions[0]?.textContent?.trim() ?? '',
   )
-  const directionTimelineNode = await page.$eval(
-    '.s-timeline-node',
-    (node) => (node.textContent ?? '').trim(),
-  )
-  assert(directionTimelineNode.includes('SAT 算法复现实验'), '方向筛选后的时间线节点不正确')
-  pass('时间线方向筛选', '仅保留研究生方向的 1 个时间节点')
-
-  const satTimelineOption = await page.$$eval(
-    'select[aria-label="时间线能力范围"] option',
-    (options) => {
-      const option = options.find((item) => (item.textContent ?? '').includes('SAT 与局部搜索'))
-      return option ? { value: option.value, text: option.textContent?.trim() ?? '' } : null
-    },
-  )
-  assert(satTimelineOption, '时间线能力筛选缺少 SAT 与局部搜索')
-  await setSelect(page, 'select[aria-label="时间线能力范围"]', satTimelineOption.value)
-  await page.waitForFunction(
-    () => document.querySelectorAll('.s-timeline-node').length === 1,
-    { timeout: 8000 },
-  )
-  pass('时间线能力筛选', '可按具体能力收敛到单个里程碑')
-
-  await page.click('.s-timeline-node')
-  await page.waitForSelector('.drawer-panel', { timeout: 8000 })
-  await waitText(page, '验收条件')
-  await waitText(page, '关联目标（1）')
+  assert(linkedFilter.includes('SAT 与局部搜索'), `能力深链未带上筛选：${linkedFilter}`)
+  const linkedGoals = await page.$$eval('.goal-tree-row', (nodes) => nodes.length)
+  assert(linkedGoals >= 1, `能力深链后目标列表为空，实际 ${linkedGoals}`)
   await waitText(page, '掌握 ACO 求解 SAT 的基本原理与实现')
-  const datesBefore = await page.$$eval('.milestone-detail-grid strong', (nodes) =>
-    nodes.slice(0, 2).map((node) => (node.textContent ?? '').trim()),
-  )
-  await page.click('.milestone-date-editor .date-shift-btn')
-  await waitText(page, '已提前 1 天')
-  await page.waitForFunction(
-    (previous) => {
-      const current = Array.from(document.querySelectorAll('.milestone-detail-grid strong'))
-        .slice(0, 2)
-        .map((node) => (node.textContent ?? '').trim())
-      return current.some((value, index) => value !== previous[index])
-    },
-    { timeout: 8000, polling: 100 },
-    datesBefore,
-  )
-  pass('S 型节点详情与日期微调', '验收条件、关联目标与日期微调均可操作')
-  await closeDrawer(page)
+  pass('能力跳转目标拆解', `已筛选 ${linkedFilter}，${linkedGoals} 个目标可继续拆解`)
+  await delay(400)
+  await page.screenshot({ path: '/tmp/growth-os-ui4-goals-link.png', fullPage: true })
+  pass('能力到目标链路截图', '/tmp/growth-os-ui4-goals-link.png')
 
-  await setSelect(page, 'select[aria-label="时间线方向范围"]', 'all')
-  await setSelect(page, 'select[aria-label="时间线能力范围"]', 'all')
-  await page.waitForFunction(
-    () => document.querySelectorAll('.s-timeline-node').length >= 2,
-    { timeout: 8000 },
-  )
+  await page.goto(`${APP_URL}roadmap`, { waitUntil: 'networkidle0' })
+  await page.waitForSelector('.direction-card', { timeout: 15000 })
+  await clickText(page, '.direction-summary', '研究生学业与科研')
+  await page.waitForSelector('.ability-node', { timeout: 8000 })
   await delay(450)
   await page.screenshot({ path: '/tmp/growth-os-ui4-roadmap.png', fullPage: true })
   pass('路线图截图', '/tmp/growth-os-ui4-roadmap.png')
 
   await page.reload({ waitUntil: 'networkidle0' })
   await page.waitForSelector('.direction-card', { timeout: 15000 })
-  await page.waitForSelector('.s-timeline-node', { timeout: 10000 })
   const persistedRoadmap = await page.evaluate(() => ({
     openTrees: document.querySelectorAll('.direction-body').length,
-    timeline: Array.from(document.querySelectorAll('.s-timeline-node')).map(
-      (node) => (node.textContent ?? '').trim(),
-    ),
+    abilityNodes: document.querySelectorAll('.ability-node').length,
   }))
   assert(persistedRoadmap.openTrees === 0, '刷新后方向应恢复为默认折叠')
-  assert(
-    persistedRoadmap.timeline.some((text) => text.includes('SAT 算法复现实验')),
-    '刷新后 S 型时间线未保留里程碑',
-  )
-  pass('刷新后路线图持久化', '默认保持折叠，里程碑时间节点仍存在')
+  assert(persistedRoadmap.abilityNodes === 0, '刷新后不应自动展开能力节点')
+  pass('刷新后路线图持久化', '默认保持折叠，能力节点按需展开')
 
   await page.setViewport({ width: 390, height: 844 })
   await delay(350)

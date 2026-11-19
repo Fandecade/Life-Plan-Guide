@@ -16,6 +16,7 @@ export interface Goal extends BaseEntity {
   description: string
   goalType: GoalType
   parentGoalId: string | null
+  competencyId: string | null
   startDate: string | null
   dueDate: string | null
   priority: Priority

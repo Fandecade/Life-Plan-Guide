@@ -46,7 +46,7 @@ const V3_STORES = {
   competencies: 'id, parentId, category, status, createdAt, updatedAt, archivedAt',
   directionCompetencies: 'id, directionId, competencyId, [directionId+competencyId], updatedAt',
   milestones: 'id, directionId, status, dueDate, importance, createdAt, updatedAt, archivedAt',
-  goals: 'id, parentGoalId, status, goalType, dueDate, createdAt, updatedAt, archivedAt',
+  goals: 'id, parentGoalId, competencyId, status, goalType, dueDate, createdAt, updatedAt, archivedAt',
   goalDirections: 'id, goalId, directionId, [goalId+directionId], updatedAt',
   goalMilestones: 'id, goalId, milestoneId, [goalId+milestoneId], updatedAt',
   tasks: 'id, parentTaskId, status, taskType, scheduledDate, dueDate, priority, createdAt, updatedAt, archivedAt',
@@ -149,6 +149,14 @@ export class GrowthDatabase extends Dexie {
         .modify((milestone) => {
           if (milestone.competencyId === undefined) {
             milestone.competencyId = null
+          }
+        })
+      await transaction
+        .table<Goal>('goals')
+        .toCollection()
+        .modify((goal) => {
+          if (goal.competencyId === undefined) {
+            goal.competencyId = null
           }
         })
     })

@@ -254,7 +254,7 @@ export const reviewTypeLabels: Record<ReviewType, string> = {
   DAILY: '每日复盘',
   WEEKLY: '周复盘',
   MONTHLY: '月复盘',
-  MILESTONE: '里程碑复盘',
+  MILESTONE: '阶段复盘',
 }
 
 export const reviewStatusLabels: Record<ReviewStatus, string> = {

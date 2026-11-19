@@ -9,11 +9,12 @@ import { useToast } from '@/composables/useToast'
 import { repos, seedDemoData } from '@/data'
 import {
   evidenceTypeLabels,
-  importanceLabels,
-  milestoneStatusLabels,
+  goalStatusLabels,
   priorityLabels,
+  ProgressMode,
   progressModeLabels,
   taskTypeLabels,
+  type Goal,
 } from '@/domain'
 import { formatDuration, formatShortDate, formatTime, relativeDay } from '@/utils/date'
 
@@ -35,7 +36,7 @@ const {
   pendingHabits,
   checkedHabitsToday,
   dueReviews,
-  upcomingMilestones,
+  upcomingGoals,
   recentEvidence,
   todayMinutes,
   activeGoals,
@@ -68,6 +69,14 @@ function go(path: string): void {
   void router.push(path)
 }
 
+function progressModeText(goal: Goal): string {
+  const mode =
+    goal.progressMode === ProgressMode.MILESTONE_BASED
+      ? ProgressMode.TASK_BASED
+      : goal.progressMode
+  return progressModeLabels[mode]
+}
+
 function goLearningForTask(taskId: string): void {
   void router.push({ path: '/learning', query: { task: taskId } })
 }
@@ -80,8 +89,8 @@ function openReview(reviewId: string): void {
   void router.push({ path: '/learning', query: { review: reviewId } })
 }
 
-function openMilestone(milestoneId: string): void {
-  void router.push({ path: '/roadmap', query: { milestone: milestoneId } })
+function openGoal(goalId: string): void {
+  void router.push({ path: '/goals', query: { goal: goalId } })
 }
 
 async function chooseFocus(event: Event): Promise<void> {
@@ -354,16 +363,16 @@ onMounted(() => {
           <li>
             <span class="step-index">02</span>
             <div>
-              <strong>建立能力地图与里程碑</strong>
-              <p>把方向翻译成需要具备的能力和阶段成果。已开放。</p>
+              <strong>建立发展方向与能力地图</strong>
+              <p>用方向组织需要具备的能力，作为目标拆解的锚点。已开放。</p>
             </div>
             <button class="btn btn-sm btn-secondary" @click="go('/roadmap')">进入</button>
           </li>
           <li>
             <span class="step-index">03</span>
             <div>
-              <strong>从里程碑拆出今天能做的任务</strong>
-              <p>目标、任务、时间盒与任务依赖。已开放。</p>
+              <strong>从能力拆出可执行任务</strong>
+              <p>多级目标、任务、时间盒与任务依赖。已开放。</p>
             </div>
             <button class="btn btn-sm btn-secondary" @click="go('/goals')">进入</button>
           </li>
@@ -397,7 +406,7 @@ onMounted(() => {
         <span class="side-icon"><AppIcon name="spark" :size="19" /></span>
         <h4>先看看完整的样子</h4>
         <p>
-          载入一套演示数据：一个愿景、两个方向、能力地图、里程碑、目标、任务、习惯、学习会话、成果与复盘。
+          载入一套演示数据：一个愿景、两个方向、能力地图、多级目标、任务、习惯、学习会话、成果与复盘。
         </p>
         <button class="btn btn-primary" :disabled="seeding" @click="loadDemo">
           <AppIcon :name="seeding ? 'refresh' : 'layers'" :size="15" />
@@ -529,7 +538,7 @@ onMounted(() => {
           <EmptyState
             v-if="!loading && goalProgressList.length === 0"
             title="还没有进行中的目标"
-            description="从里程碑拆出一个目标，再用任务推进它。"
+            description="从能力拆出一个目标，再用可执行任务推进它。"
           >
             <button class="btn btn-sm btn-secondary" @click="go('/goals')">去创建目标</button>
           </EmptyState>
@@ -543,7 +552,7 @@ onMounted(() => {
                 <span class="progress-bar" :style="{ width: `${item.progress}%` }" />
               </div>
               <div class="goal-progress-meta">
-                <span>{{ progressModeLabels[item.goal.progressMode] }}</span>
+                <span>{{ progressModeText(item.goal) }}</span>
                 <span v-if="item.goal.dueDate">{{ relativeDay(item.goal.dueDate) }}</span>
               </div>
             </li>
@@ -553,31 +562,31 @@ onMounted(() => {
         <article class="card card-pad">
           <div class="section-head">
             <h3 class="section-title">
-              <AppIcon name="flag" :size="16" />
-              最近的里程碑
+              <AppIcon name="target" :size="16" />
+              近期目标
             </h3>
-            <button class="link-btn" @click="go('/roadmap')">
-              发展路线 <AppIcon name="arrow-right" :size="13" />
+            <button class="link-btn" @click="go('/goals')">
+              目标拆解 <AppIcon name="arrow-right" :size="13" />
             </button>
           </div>
           <EmptyState
-            v-if="!loading && upcomingMilestones.length === 0"
-            title="还没有即将到来的里程碑"
-            description="里程碑是阶段成果，不是普通任务。可以在发展路线模块中创建。"
+            v-if="!loading && upcomingGoals.length === 0"
+            title="还没有设置截止日期的活跃目标"
+            description="从发展路线的能力节点进入目标拆解，再把叶子目标落实为任务。"
           />
           <ul v-else class="hairline-list">
-            <li v-for="milestone in upcomingMilestones" :key="milestone.id">
-              <button class="milestone-row milestone-open" @click="openMilestone(milestone.id)">
-                <span class="milestone-mark"><AppIcon name="flag" :size="14" /></span>
+            <li v-for="goal in upcomingGoals" :key="goal.id">
+              <button class="milestone-row milestone-open" @click="openGoal(goal.id)">
+                <span class="milestone-mark"><AppIcon name="target" :size="14" /></span>
                 <span class="milestone-main">
-                  <span class="task-title">{{ milestone.name }}</span>
+                  <span class="task-title">{{ goal.title }}</span>
                   <span class="task-meta">
-                    <span class="badge badge-accent">{{ importanceLabels[milestone.importance] }}</span>
-                    <span class="badge">{{ milestoneStatusLabels[milestone.status] }}</span>
-                    <span>{{ formatShortDate(milestone.dueDate) }}</span>
+                    <span class="badge badge-accent">{{ goalStatusLabels[goal.status] }}</span>
+                    <span>{{ progressModeText(goal) }}</span>
+                    <span>{{ formatShortDate(goal.dueDate) }}</span>
                   </span>
                 </span>
-                <span class="milestone-when">{{ relativeDay(milestone.dueDate) }}</span>
+                <span class="milestone-when">{{ relativeDay(goal.dueDate) }}</span>
               </button>
             </li>
           </ul>

@@ -39,7 +39,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       title: '发展路线图',
       section: '方向与路线',
-      subtitle: '方向能力树、能力里程碑与 S 型路线时间线',
+      subtitle: '发展方向与能力树',
       phase: 3,
     },
   },
@@ -50,7 +50,7 @@ const routes: RouteRecordRaw[] = [
     meta: {
       title: '目标与任务',
       section: '执行与学习',
-      subtitle: '从里程碑拆解到今日行动',
+      subtitle: '从能力拆解目标，再从任务安排到时间盒',
       phase: 4,
     },
   },

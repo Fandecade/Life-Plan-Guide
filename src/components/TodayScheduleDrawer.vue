@@ -5,7 +5,7 @@ import DetailDrawer from './DetailDrawer.vue'
 import AppIcon from './AppIcon.vue'
 import { repos } from '@/data'
 import { isSameDay, endOfDay, formatTime, formatDuration, formatShortDate, relativeDay } from '@/utils/date'
-import { timeboxStatusLabels, type Task, type Timebox, type Milestone } from '@/domain'
+import { timeboxStatusLabels, type Goal, type Task, type Timebox } from '@/domain'
 
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: [] }>()
@@ -14,7 +14,7 @@ const router = useRouter()
 const loading = ref(false)
 const tasks = ref<Task[]>([])
 const timeboxes = ref<Timebox[]>([])
-const milestones = ref<Milestone[]>([])
+const goals = ref<Goal[]>([])
 
 const taskMap = computed(() => {
   const map: Record<string, Task> = {}
@@ -37,16 +37,15 @@ const todayTasks = computed(() =>
   ),
 )
 
-const upcomingMilestones = computed(() => {
+const upcomingGoals = computed(() => {
   const deadline = new Date()
   deadline.setDate(deadline.getDate() + 14)
-  return milestones.value
+  return goals.value
     .filter(
-      (milestone) =>
-        milestone.dueDate !== null &&
-        milestone.status !== 'COMPLETED' &&
-        milestone.status !== 'CANCELLED' &&
-        new Date(milestone.dueDate).getTime() <= endOfDay(deadline).getTime(),
+      (goal) =>
+        goal.status === 'ACTIVE' &&
+        goal.dueDate !== null &&
+        new Date(goal.dueDate).getTime() <= endOfDay(deadline).getTime(),
     )
     .sort((left, right) => (left.dueDate ?? '').localeCompare(right.dueDate ?? ''))
     .slice(0, 3)
@@ -55,14 +54,14 @@ const upcomingMilestones = computed(() => {
 async function load(): Promise<void> {
   loading.value = true
   try {
-    const [taskRows, timeboxRows, milestoneRows] = await Promise.all([
+    const [taskRows, timeboxRows, goalRows] = await Promise.all([
       repos.tasks.list(),
       repos.timeboxes.list(),
-      repos.milestones.list(),
+      repos.goals.list(),
     ])
     tasks.value = taskRows
     timeboxes.value = timeboxRows
-    milestones.value = milestoneRows
+    goals.value = goalRows
   } finally {
     loading.value = false
   }
@@ -85,7 +84,7 @@ function go(path: string): void {
   <DetailDrawer
     :open="open"
     title="今日日历"
-    subtitle="时间盒、今日任务与近期里程碑"
+    subtitle="时间盒、今日任务与近期目标"
     :width="430"
     @close="emit('close')"
   >
@@ -136,19 +135,19 @@ function go(path: string): void {
 
       <section class="calendar-section">
         <h4 class="calendar-title">
-          <AppIcon name="flag" :size="14" />
-          近期里程碑
+          <AppIcon name="target" :size="14" />
+          近期目标
         </h4>
-        <div v-if="upcomingMilestones.length === 0" class="calendar-empty">
-          未来 14 天没有里程碑。
+        <div v-if="upcomingGoals.length === 0" class="calendar-empty">
+          未来 14 天没有到期目标。
         </div>
         <div v-else class="milestone-list">
-          <div v-for="milestone in upcomingMilestones" :key="milestone.id" class="milestone-row">
-            <span class="milestone-mark"><AppIcon name="flag" :size="12" /></span>
+          <div v-for="goal in upcomingGoals" :key="goal.id" class="milestone-row">
+            <span class="milestone-mark"><AppIcon name="target" :size="12" /></span>
             <div>
-              <span class="milestone-title">{{ milestone.name }}</span>
+              <span class="milestone-title">{{ goal.title }}</span>
               <span class="milestone-meta">
-                {{ formatShortDate(milestone.dueDate) }} · {{ relativeDay(milestone.dueDate) }}
+                {{ formatShortDate(goal.dueDate) }} · {{ relativeDay(goal.dueDate) }}
               </span>
             </div>
           </div>

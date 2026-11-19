@@ -113,7 +113,7 @@ const SECTION_TITLES: Record<ReviewType, string[]> = {
     'A · 下月调整',
   ],
   [ReviewType.MILESTONE]: [
-    '原定里程碑与验收条件',
+    '原定目标与验收条件',
     '实际结果',
     '偏差与原因',
     '下一步调整',
@@ -1360,9 +1360,9 @@ onMounted(async () => {
               <div>
                 <h3 class="section-title">
                   <AppIcon name="flag" :size="16" />
-                  目标与里程碑进度
+                  目标与任务进度
                 </h3>
-                <p class="section-note">进度来自任务或里程碑完成情况；人工进度模式会明确标注为人工值。</p>
+                <p class="section-note">进度来自任务完成情况；人工进度模式会明确标注为人工值。</p>
               </div>
             </div>
             <div v-if="goalProgress.length" class="goal-progress-list">
@@ -1375,7 +1375,7 @@ onMounted(async () => {
                   <span class="progress-bar" :style="{ width: `${goal.progress}%` }" />
                 </div>
                 <small>
-                  任务 {{ goal.taskDone }}/{{ goal.taskTotal }} · 里程碑 {{ goal.milestoneDone }}/{{ goal.milestoneTotal }}
+                  任务 {{ goal.taskDone }}/{{ goal.taskTotal }}
                 </small>
               </div>
             </div>
@@ -1503,7 +1503,7 @@ onMounted(async () => {
             </div>
           </div>
           <p class="coverage-note">
-            建议至少保持每日复盘与每周复盘。月度和里程碑复盘可以按节奏安排。
+            建议至少保持每日复盘与每周复盘。月度复盘和阶段复盘可以按节奏安排。
           </p>
         </article>
       </section>
@@ -1878,7 +1878,7 @@ onMounted(async () => {
           <EmptyState
             v-if="detailAdjustments.length === 0"
             title="还没有计划调整"
-            description="把发现转成对任务、目标、习惯、里程碑或方向的具体修改。"
+            description="把发现转成对任务、目标、习惯或方向的具体修改。"
           />
           <div v-else class="adjustment-list">
             <article

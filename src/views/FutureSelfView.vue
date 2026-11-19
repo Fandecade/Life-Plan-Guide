@@ -2,7 +2,6 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppIcon from '@/components/AppIcon.vue'
-import EmptyState from '@/components/EmptyState.vue'
 import ModalDialog from '@/components/ModalDialog.vue'
 import IdentityCapabilityTree from '@/components/IdentityCapabilityTree.vue'
 import { useToast } from '@/composables/useToast'
@@ -21,7 +20,7 @@ import {
   type Identity,
   type Vision,
 } from '@/domain'
-import { formatDate, formatDuration, formatShortDate, fromDateInput, relativeDay, toDateInput } from '@/utils/date'
+import { formatDate, formatDuration, fromDateInput, relativeDay, toDateInput } from '@/utils/date'
 
 const { success, error: toastError } = useToast()
 const route = useRoute()
@@ -34,7 +33,6 @@ const {
   selectedVisionId,
   visibleVisions,
   selectedIdentities,
-  selectedDirections,
   activeVisions,
   activeDirectionCount,
   activeIdentityCount,
@@ -45,10 +43,9 @@ const {
   countIdentities,
   defaultIdentityId,
   directionsForIdentity,
-  identityForDirection,
-  milestonesForIdentity,
   capabilityTreeForIdentity,
   capabilityCountForIdentity,
+  goalCountForIdentity,
   refresh,
   saveVision,
   saveIdentity,
@@ -150,6 +147,9 @@ const priorityOptions = [
 const colorOptions = ['#3563e9', '#b26a1f', '#6b58b8', '#c04a3f', '#2f9d6b', '#5f6b80']
 
 const selectedIdentityId = ref<string | null>(null)
+const capabilityTreeExpanded = ref(true)
+const capabilityTreeAllCollapsed = ref(false)
+const capabilityTreeRevision = ref(0)
 
 const selectedIdentity = computed(
   () =>
@@ -165,12 +165,12 @@ const identityCapabilities = computed(() =>
   selectedIdentity.value ? capabilityTreeForIdentity(selectedIdentity.value.id) : [],
 )
 
-const identityMilestoneCount = computed(() =>
-  selectedIdentity.value ? milestonesForIdentity(selectedIdentity.value.id).length : 0,
-)
-
 const identityCapabilityCount = computed(() =>
   selectedIdentity.value ? capabilityCountForIdentity(selectedIdentity.value.id) : 0,
+)
+
+const identityGoalCount = computed(() =>
+  selectedIdentity.value ? goalCountForIdentity(selectedIdentity.value.id) : 0,
 )
 
 watch(
@@ -189,22 +189,25 @@ watch(
 
 function selectIdentity(identityId: string): void {
   selectedIdentityId.value = identityId
-}
-
-function directionMilestoneCount(directionId: string): number {
-  return selectedIdentity.value
-    ? milestonesForIdentity(selectedIdentity.value.id).filter(
-        (milestone) => milestone.directionId === directionId,
-      ).length
-    : 0
-}
-
-function directionIdentityName(direction: Direction): string {
-  return identityForDirection(direction)?.title ?? '未归属身份'
+  capabilityTreeAllCollapsed.value = false
+  capabilityTreeRevision.value += 1
 }
 
 function openRoadmapForDirection(directionId: string): void {
   void router.push({ path: '/roadmap', query: { direction: directionId } })
+}
+
+function openGoalsForCompetency(competencyId: string): void {
+  void router.push({ path: '/goals', query: { competency: competencyId } })
+}
+
+function toggleCapabilityTree(): void {
+  capabilityTreeExpanded.value = !capabilityTreeExpanded.value
+}
+
+function toggleAllCapabilityNodes(): void {
+  capabilityTreeAllCollapsed.value = !capabilityTreeAllCollapsed.value
+  capabilityTreeRevision.value += 1
 }
 
 const modalTitle = computed(() => {
@@ -222,7 +225,7 @@ const modalSubtitle = computed(() => {
     return '身份是未来希望承担的角色，一个愿景可以对应多个身份。'
   }
   if (modalKind.value === 'direction') {
-    return '方向归属一个未来身份，是能力训练、里程碑与时间线的共同载体。'
+    return '方向归属一个未来身份，用来组织能力、训练重点与路线视图。'
   }
   return ''
 })
@@ -252,6 +255,14 @@ const confirmText = computed(() => {
 function selectVision(vision: Vision): void {
   selectedIdentityId.value = null
   selectedVisionId.value = vision.id
+  capabilityTreeExpanded.value = true
+  capabilityTreeAllCollapsed.value = false
+  capabilityTreeRevision.value += 1
+}
+
+function selectVisionById(visionId: string): void {
+  const vision = visibleVisions.value.find((item) => item.id === visionId)
+  if (vision) selectVision(vision)
 }
 
 function resetModal(): void {
@@ -482,7 +493,7 @@ onMounted(async () => {
         <p class="page-eyebrow">方向与路线 · 愿景与身份</p>
         <h2 class="page-title">未来自我</h2>
         <p class="page-subtitle">
-          愿景容纳多个未来身份；选择身份作为能力树根，再拆解大能力与子能力，并通过发展方向接入里程碑和时间线。
+          愿景定义长期方向，身份提供能力树的结构。具体能力在发展路线中维护，再进入目标拆解成为可执行任务。
         </p>
       </div>
       <div class="header-actions">
@@ -541,7 +552,6 @@ onMounted(async () => {
     </section>
 
     <div v-if="loading" class="future-layout">
-      <div class="skeleton future-rail-skeleton" />
       <div class="skeleton future-detail-skeleton" />
     </div>
 
@@ -573,48 +583,31 @@ onMounted(async () => {
     </div>
 
     <div v-else class="future-layout">
-      <aside class="card vision-rail">
-        <div class="rail-head">
-          <span class="rail-title">愿景列表</span>
-          <button class="icon-btn" aria-label="新建愿景" title="新建愿景" @click="openVisionCreate">
-            <AppIcon name="plus" :size="16" />
-          </button>
-        </div>
-        <ul class="vision-list">
-          <li v-for="vision in visibleVisions" :key="vision.id">
-            <button
-              class="vision-item"
-              :class="{ active: vision.id === selectedVision?.id, archived: vision.archivedAt }"
-              @click="selectVision(vision)"
-            >
-              <span
-                class="vision-status-dot"
-                :class="`status-${vision.status.toLowerCase()}`"
-              />
-              <span class="vision-item-copy">
-                <span class="vision-item-title">{{ vision.title }}</span>
-                <span class="vision-item-meta">
-                  {{ countDirections(vision.id) }} 个方向 · {{ countIdentities(vision.id) }} 个身份
-                </span>
-              </span>
-              <span v-if="vision.archivedAt" class="badge">已归档</span>
-            </button>
-          </li>
-        </ul>
-        <div v-if="archivedVisionCount" class="rail-foot">
-          <button class="link-btn" @click="includeArchived = !includeArchived">
-            <AppIcon name="archive" :size="13" />
-            {{ includeArchived ? '隐藏已归档' : `还有 ${archivedVisionCount} 个已归档愿景` }}
-          </button>
-        </div>
-      </aside>
-
       <section v-if="selectedVision" class="vision-detail">
         <article class="card vision-head">
           <div class="vision-head-top">
-            <p class="page-eyebrow">
-              Future Vision · {{ visionStatusLabels[selectedVision.status] }}
-            </p>
+            <div class="vision-selector-block">
+              <label class="vision-selector-label" for="vision-select">
+                FUTURE VISION
+                <span>{{ visionStatusLabels[selectedVision.status] }}</span>
+              </label>
+              <div class="vision-select-wrap">
+                <AppIcon name="compass" :size="16" />
+                <select
+                  id="vision-select"
+                  class="vision-select"
+                  aria-label="选择未来愿景"
+                  :value="selectedVision.id"
+                  @change="selectVisionById(($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-for="vision in visibleVisions" :key="vision.id" :value="vision.id">
+                    {{ vision.title }} · {{ countDirections(vision.id) }} 个方向 ·
+                    {{ countIdentities(vision.id) }} 个身份{{ vision.archivedAt ? '（已归档）' : '' }}
+                  </option>
+                </select>
+                <AppIcon name="arrow-right" :size="14" class="vision-select-arrow" />
+              </div>
+            </div>
             <div class="vision-head-actions">
               <button
                 v-if="selectedVision.archivedAt"
@@ -681,21 +674,39 @@ onMounted(async () => {
                 身份能力树
               </h3>
               <p class="section-note">
-                以未来身份为根，拆解需要掌握的各级能力；能力再连接到发展方向与路线图。
+                以未来身份为根查看能力地图；在发展路线中维护能力归属，在目标拆解中把能力变成成果与任务。
               </p>
             </div>
-            <div v-if="!selectedVision.archivedAt" class="identity-map-actions">
-              <button class="btn btn-sm btn-secondary" @click="openIdentityCreate">
+            <div class="identity-map-actions">
+              <button
+                v-if="!selectedVision.archivedAt"
+                class="btn btn-sm btn-secondary"
+                @click="openIdentityCreate"
+              >
                 <AppIcon name="plus" :size="14" />
                 添加身份
               </button>
               <button
+                v-if="!selectedVision.archivedAt"
                 class="btn btn-sm btn-ghost"
                 :disabled="!selectedIdentity"
                 @click="selectedIdentity && openDirectionCreate(selectedIdentity.id)"
               >
                 <AppIcon name="plus" :size="14" />
                 添加方向
+              </button>
+              <button
+                v-if="selectedIdentities.length"
+                class="btn btn-sm btn-ghost"
+                :aria-expanded="capabilityTreeExpanded"
+                @click="toggleCapabilityTree"
+              >
+                <AppIcon
+                  name="arrow-right"
+                  :size="14"
+                  :class="{ 'tree-head-chevron-expanded': capabilityTreeExpanded }"
+                />
+                {{ capabilityTreeExpanded ? '收起能力树' : '展开能力树' }}
               </button>
             </div>
           </div>
@@ -742,7 +753,11 @@ onMounted(async () => {
               </button>
             </div>
 
-            <template v-if="selectedIdentity">
+            <div
+              v-if="selectedIdentity"
+              v-show="capabilityTreeExpanded"
+              class="identity-tree-body"
+            >
               <section class="identity-root">
                 <div class="identity-root-mark">
                   <span class="identity-root-avatar">{{ selectedIdentity.title.slice(0, 1) }}</span>
@@ -752,15 +767,28 @@ onMounted(async () => {
                   <p class="identity-root-eyebrow">Future Identity · 能力树根节点</p>
                   <div class="identity-root-title-row">
                     <h4>{{ selectedIdentity.title }}</h4>
-                    <button
-                      v-if="!selectedIdentity.archivedAt"
-                      class="icon-btn"
-                      title="编辑身份"
-                      aria-label="编辑身份"
-                      @click="openIdentityEdit(selectedIdentity)"
-                    >
-                      <AppIcon name="sliders" :size="15" />
-                    </button>
+                    <div class="row-actions identity-root-actions">
+                      <button
+                        v-if="!selectedIdentity.archivedAt"
+                        class="icon-btn"
+                        title="编辑身份"
+                        aria-label="编辑身份"
+                        @click="openIdentityEdit(selectedIdentity)"
+                      >
+                        <AppIcon name="sliders" :size="15" />
+                      </button>
+                      <button
+                        class="icon-btn"
+                        :title="selectedIdentity.archivedAt ? '恢复身份' : '归档身份'"
+                        :aria-label="selectedIdentity.archivedAt ? '恢复身份' : '归档身份'"
+                        @click="askToggle('identity', selectedIdentity.id, selectedIdentity.title, selectedIdentity.archivedAt)"
+                      >
+                        <AppIcon
+                          :name="selectedIdentity.archivedAt ? 'archive' : 'trash'"
+                          :size="14"
+                        />
+                      </button>
+                    </div>
                   </div>
                   <p v-if="selectedIdentity.identityStatement" class="identity-root-statement">
                     “{{ selectedIdentity.identityStatement }}”
@@ -772,67 +800,76 @@ onMounted(async () => {
                     <span><strong>{{ identityDirections.length }}</strong> 个发展方向</span>
                     <span><strong>{{ identityCapabilities.length }}</strong> 个根能力</span>
                     <span><strong>{{ identityCapabilityCount }}</strong> 个能力节点</span>
-                    <span><strong>{{ identityMilestoneCount }}</strong> 个里程碑</span>
+                    <span><strong>{{ identityGoalCount }}</strong> 个关联目标</span>
                   </div>
+                  <details v-if="identityDirections.length" class="identity-direction-manage">
+                    <summary>路线管理</summary>
+                    <div class="identity-direction-manage-list">
+                      <div
+                        v-for="direction in identityDirections"
+                        :key="direction.id"
+                        class="identity-direction-manage-row"
+                      >
+                        <button type="button" class="link-btn" @click="openRoadmapForDirection(direction.id)">
+                          {{ direction.name }}
+                        </button>
+                        <div class="row-actions">
+                          <button
+                            v-if="!direction.archivedAt"
+                            class="icon-btn"
+                            title="编辑方向"
+                            aria-label="编辑方向"
+                            @click="openDirectionEdit(direction)"
+                          >
+                            <AppIcon name="sliders" :size="13" />
+                          </button>
+                          <button
+                            class="icon-btn"
+                            :title="direction.archivedAt ? '恢复方向' : '归档方向'"
+                            :aria-label="direction.archivedAt ? '恢复方向' : '归档方向'"
+                            @click="askToggle('direction', direction.id, direction.name, direction.archivedAt)"
+                          >
+                            <AppIcon
+                              :name="direction.archivedAt ? 'archive' : 'trash'"
+                              :size="13"
+                            />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </details>
                 </div>
-              </section>
-
-              <section class="identity-direction-summary" aria-label="该身份的关联方向">
-                <div class="direction-summary-head">
-                  <span class="direction-summary-title">
-                    <AppIcon name="map" :size="15" />
-                    发展方向
-                  </span>
-                  <button
-                    v-if="!selectedVision.archivedAt"
-                    class="link-btn"
-                    @click="openDirectionCreate(selectedIdentity.id)"
-                  >
-                    <AppIcon name="plus" :size="13" />
-                    新增方向
-                  </button>
-                </div>
-                <div v-if="identityDirections.length" class="identity-direction-pills">
-                  <button
-                    v-for="direction in identityDirections"
-                    :key="direction.id"
-                    type="button"
-                    class="identity-direction-pill"
-                    :style="{ '--direction-color': direction.color }"
-                    @click="openRoadmapForDirection(direction.id)"
-                  >
-                    <span class="identity-direction-dot" />
-                    <span class="identity-direction-name">{{ direction.name }}</span>
-                    <span class="identity-direction-meta">
-                      {{ directionStatusLabels[direction.status] }} ·
-                      {{ directionMilestoneCount(direction.id) }} 里程碑
-                    </span>
-                    <AppIcon name="arrow-right" :size="13" />
-                  </button>
-                </div>
-                <p v-else class="direction-summary-empty">
-                  还没有发展方向。方向负责把能力训练安排进里程碑与时间线。
-                </p>
               </section>
 
               <section class="capability-tree-panel">
                 <div class="capability-tree-head">
                   <div>
                     <span class="capability-tree-title">能力拆解</span>
-                    <p>大能力可以继续拆成子能力；点击任一方向可进入发展路线图。</p>
+                    <p>大能力可以继续拆成子能力；点击方向回到路线，点击“拆解为目标”进入执行规划。</p>
                   </div>
-                  <span class="tree-legend">
-                    <span class="legend-line" />
-                    实线卡片为已关联方向的能力
-                  </span>
+                  <div class="capability-tree-head-actions">
+                    <span class="tree-legend">
+                      <span class="legend-line" />
+                      实线卡片为已关联方向的能力
+                    </span>
+                    <button
+                      class="btn btn-sm btn-ghost"
+                      :disabled="!identityCapabilities.length"
+                      @click="toggleAllCapabilityNodes"
+                    >
+                      {{ capabilityTreeAllCollapsed ? '全部展开' : '全部收起' }}
+                    </button>
+                  </div>
                 </div>
 
                 <ul v-if="identityCapabilities.length" class="capability-tree-root">
                   <IdentityCapabilityTree
                     v-for="node in identityCapabilities"
-                    :key="node.competency.id"
+                    :key="`${node.competency.id}-${capabilityTreeRevision}`"
                     :node="node"
+                    :force-collapsed="capabilityTreeAllCollapsed"
                     @view-direction="openRoadmapForDirection"
+                    @view-goals="openGoalsForCompetency"
                   />
                 </ul>
 
@@ -848,7 +885,7 @@ onMounted(async () => {
                       到发展路线图的能力地图中新增能力，并把能力关联到该方向，它就会出现在这里。
                     </p>
                     <p v-else>
-                      能力必须通过发展方向进入路线图。创建方向后，就能添加能力、里程碑并安排时间线。
+                      能力通过发展方向进入路线图。创建方向后，就能维护能力树并连接到目标拆解。
                     </p>
                   </div>
                   <button
@@ -868,178 +905,8 @@ onMounted(async () => {
                   </button>
                 </div>
               </section>
-            </template>
+            </div>
           </template>
-        </article>
-
-
-        <article class="card card-pad">
-          <div class="section-head">
-            <h3 class="section-title">
-              <AppIcon name="layers" :size="16" />
-              未来身份
-              <span class="count-pill">{{ selectedIdentities.length }}</span>
-            </h3>
-            <button
-              v-if="!selectedVision.archivedAt"
-              class="btn btn-sm btn-secondary"
-              @click="openIdentityCreate"
-            >
-              <AppIcon name="plus" :size="14" />
-              添加身份
-            </button>
-          </div>
-
-          <EmptyState
-            v-if="selectedIdentities.length === 0"
-            title="还没有描述未来身份"
-            description="身份不是职位名称，而是你希望以什么方式存在和工作。例如“能够独立把复杂系统做出来的工程师”。"
-          >
-            <button
-              v-if="!selectedVision.archivedAt"
-              class="btn btn-sm btn-secondary"
-              @click="openIdentityCreate"
-            >
-              添加第一个身份
-            </button>
-          </EmptyState>
-
-          <ul v-else class="identity-list">
-            <li v-for="identity in selectedIdentities" :key="identity.id" class="identity-item">
-              <span class="identity-mark">{{ identity.title.slice(0, 1) }}</span>
-              <div class="identity-copy">
-                <div class="identity-head">
-                  <span class="identity-title">{{ identity.title }}</span>
-                  <span v-if="identity.archivedAt" class="badge">已归档</span>
-                </div>
-                <p v-if="identity.identityStatement" class="identity-statement">
-                  “{{ identity.identityStatement }}”
-                </p>
-                <p v-if="identity.description" class="identity-desc">{{ identity.description }}</p>
-              </div>
-              <div class="row-actions">
-                <button
-                  v-if="!identity.archivedAt"
-                  class="icon-btn"
-                  title="编辑身份"
-                  aria-label="编辑身份"
-                  @click="openIdentityEdit(identity)"
-                >
-                  <AppIcon name="sliders" :size="14" />
-                </button>
-                <button
-                  class="icon-btn"
-                  :title="identity.archivedAt ? '恢复身份' : '归档身份'"
-                  :aria-label="identity.archivedAt ? '恢复身份' : '归档身份'"
-                  @click="askToggle('identity', identity.id, identity.title, identity.archivedAt)"
-                >
-                  <AppIcon :name="identity.archivedAt ? 'archive' : 'trash'" :size="14" />
-                </button>
-              </div>
-            </li>
-          </ul>
-        </article>
-
-        <article class="card card-pad">
-          <div class="section-head">
-            <h3 class="section-title">
-              <AppIcon name="map" :size="16" />
-              发展方向
-              <span class="count-pill">{{ selectedDirections.length }}</span>
-            </h3>
-            <button
-              v-if="!selectedVision.archivedAt"
-              class="btn btn-sm btn-secondary"
-              @click="openDirectionCreate()"
-            >
-              <AppIcon name="plus" :size="14" />
-              添加方向
-            </button>
-          </div>
-
-          <EmptyState
-            v-if="selectedDirections.length === 0"
-            title="还没有具体发展方向"
-            description="一个愿景可以对应多个方向，例如“软硬件工程”和“研究生科研”。方向会承载能力地图与里程碑。"
-          >
-            <button
-              v-if="!selectedVision.archivedAt"
-              class="btn btn-sm btn-secondary"
-              @click="openDirectionCreate()"
-            >
-              添加第一个方向
-            </button>
-          </EmptyState>
-
-          <div v-else class="direction-grid">
-            <article
-              v-for="direction in selectedDirections"
-              :key="direction.id"
-              class="direction-card"
-              :class="{ archived: direction.archivedAt }"
-              :style="{ '--direction-color': direction.color }"
-            >
-              <div class="direction-top">
-                <span class="direction-swatch" />
-                <div class="direction-head">
-                  <div class="direction-title-block">
-                    <span class="direction-name">{{ direction.name }}</span>
-                    <span class="direction-identity">
-                      所属身份 · {{ directionIdentityName(direction) }}
-                    </span>
-                  </div>
-                  <span class="badge">{{ directionStatusLabels[direction.status] }}</span>
-                </div>
-              </div>
-              <p class="direction-desc">
-                {{ direction.description || '还没有补充方向说明。' }}
-              </p>
-              <div class="direction-meta">
-                <div>
-                  <span class="meta-label">优先级</span>
-                  <span class="meta-value">
-                    {{ priorityOptions.find((item) => item.value === direction.priority)?.label ?? `P${direction.priority}` }}
-                  </span>
-                </div>
-                <div>
-                  <span class="meta-label">每周预算</span>
-                  <span class="meta-value">{{ formatDuration(direction.weeklyTimeBudget) }}</span>
-                </div>
-                <div>
-                  <span class="meta-label">时间范围</span>
-                  <span class="meta-value">
-                    {{ formatShortDate(direction.startDate) }} → {{ formatShortDate(direction.targetDate) }}
-                  </span>
-                </div>
-                <div>
-                  <span class="meta-label">审视周期</span>
-                  <span class="meta-value">{{ direction.reviewFrequency || '未设置' }}</span>
-                </div>
-              </div>
-              <div class="direction-foot">
-                <span class="direction-days">{{ relativeDay(direction.targetDate) }}</span>
-                <div class="row-actions">
-                  <button
-                    v-if="!direction.archivedAt"
-                    class="icon-btn"
-                    title="编辑方向"
-                    aria-label="编辑方向"
-                    @click="openDirectionEdit(direction)"
-                  >
-                    <AppIcon name="sliders" :size="14" />
-                  </button>
-                  <button
-                    class="icon-btn"
-                    :title="direction.archivedAt ? '恢复方向' : '归档方向'"
-                    :aria-label="direction.archivedAt ? '恢复方向' : '归档方向'"
-                    @click="askToggle('direction', direction.id, direction.name, direction.archivedAt)"
-                  >
-                    <AppIcon :name="direction.archivedAt ? 'archive' : 'trash'" :size="14" />
-                  </button>
-                </div>
-              </div>
-            </article>
-          </div>
         </article>
       </section>
     </div>
@@ -1284,7 +1151,7 @@ onMounted(async () => {
         </div>
 
         <div class="field">
-          <span class="field-label">时间线颜色</span>
+          <span class="field-label">方向标识色</span>
           <div class="color-row">
             <button
               v-for="color in colorOptions"
@@ -1420,130 +1287,91 @@ onMounted(async () => {
 
 .future-layout {
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   align-items: start;
-}
-
-.future-rail-skeleton {
-  height: 320px;
 }
 
 .future-detail-skeleton {
   height: 520px;
 }
 
-.vision-rail {
-  padding: 15px 12px;
-  position: sticky;
-  top: calc(var(--topbar-height) + 18px);
+.vision-selector-block {
+  min-width: 0;
+  max-width: 760px;
+  flex: 1;
 }
 
-.rail-head {
+.vision-selector-label {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 0 4px 9px;
-}
-
-.rail-title {
+  gap: 8px;
+  color: var(--muted);
+  font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--muted);
+  letter-spacing: 0.1em;
 }
 
-.vision-list {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.vision-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-  width: 100%;
-  padding: 10px 9px;
-  border-radius: var(--radius-sm);
-  text-align: left;
-  transition:
-    background-color 0.16s ease,
-    color 0.16s ease;
-}
-
-.vision-item:hover {
-  background: var(--surface-muted);
-}
-
-.vision-item.active {
+.vision-selector-label span {
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
   background: var(--accent-soft);
-}
-
-.vision-item.archived {
-  opacity: 0.72;
-}
-
-.vision-status-dot {
-  width: 6px;
-  height: 6px;
-  flex: none;
-  margin-top: 6px;
-  border-radius: 50%;
-  background: var(--muted);
-}
-
-.status-active {
-  background: var(--accent);
-}
-
-.status-adjusting {
-  background: var(--amber);
-}
-
-.status-completed {
-  background: var(--blue);
-}
-
-.status-draft {
-  background: var(--line-strong);
-}
-
-.vision-item-copy {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.vision-item-title {
-  font-size: 12.5px;
-  font-weight: 550;
-  line-height: 1.5;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.vision-item-meta {
+  color: var(--accent-ink);
+  font-family: var(--font-sans);
   font-size: 10px;
-  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 0;
 }
 
-.vision-item .badge {
-  flex: none;
-  height: 17px;
-  padding: 0 5px;
-  font-size: 9px;
+.vision-select-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: min(600px, 100%);
+  margin-top: 8px;
+  color: var(--accent);
 }
 
-.rail-foot {
-  margin-top: 9px;
-  padding: 9px 4px 2px;
-  border-top: 1px solid var(--line-faint);
+.vision-select-wrap > .icon:first-child {
+  position: absolute;
+  left: 14px;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.vision-select {
+  width: 100%;
+  height: 43px;
+  appearance: none;
+  padding: 0 42px 0 40px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-radius: var(--radius-md);
+  outline: none;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  box-shadow: var(--shadow-xs);
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+
+.vision-select:hover,
+.vision-select:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+  box-shadow: 0 0 0 3px var(--accent-faint);
+}
+
+.vision-select-arrow {
+  position: absolute;
+  right: 15px;
+  pointer-events: none;
+  transform: rotate(90deg);
 }
 
 .link-btn {
@@ -1659,71 +1487,6 @@ onMounted(async () => {
   font-weight: 600;
 }
 
-.identity-list {
-  display: flex;
-  flex-direction: column;
-}
-
-.identity-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 13px 0;
-  border-top: 1px solid var(--line-faint);
-}
-
-.identity-item:first-child {
-  border-top: none;
-  padding-top: 0;
-}
-
-.identity-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  flex: none;
-  border-radius: 50%;
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-  font-family: var(--font-serif);
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.identity-copy {
-  flex: 1;
-  min-width: 0;
-}
-
-.identity-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.identity-title {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.identity-statement {
-  margin-top: 3px;
-  color: var(--accent-ink);
-  font-family: var(--font-serif);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.identity-desc {
-  margin-top: 3px;
-  color: var(--muted);
-  font-size: 11.5px;
-  line-height: 1.65;
-}
-
 .row-actions {
   display: flex;
   align-items: center;
@@ -1734,114 +1497,6 @@ onMounted(async () => {
 .row-actions .icon-btn {
   width: 29px;
   height: 29px;
-}
-
-.direction-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.direction-card {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-md);
-  padding: 15px;
-  background: var(--surface);
-  transition:
-    border-color 0.16s ease,
-    box-shadow 0.16s ease;
-}
-
-.direction-card:hover {
-  border-color: var(--line-strong);
-  box-shadow: var(--shadow-sm);
-}
-
-.direction-card.archived {
-  opacity: 0.68;
-  background: var(--surface-muted);
-}
-
-.direction-top {
-  display: flex;
-  align-items: flex-start;
-  gap: 9px;
-}
-
-.direction-swatch {
-  width: 4px;
-  height: 34px;
-  flex: none;
-  border-radius: var(--radius-pill);
-  background: var(--direction-color, var(--accent));
-}
-
-.direction-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
-}
-
-.direction-name {
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.45;
-}
-
-.direction-desc {
-  margin-top: 8px;
-  min-height: 38px;
-  color: var(--muted);
-  font-size: 11.5px;
-  line-height: 1.65;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.direction-meta {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 12px;
-  margin-top: 13px;
-  padding-top: 12px;
-  border-top: 1px solid var(--line-faint);
-}
-
-.direction-meta > div {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-
-.meta-label {
-  font-size: 9.5px;
-  color: var(--muted);
-}
-
-.meta-value {
-  font-size: 11px;
-  font-weight: 550;
-  color: var(--ink-soft);
-}
-
-.direction-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 10px;
-  padding-top: 9px;
-  border-top: 1px solid var(--line-faint);
-}
-
-.direction-days {
-  font-size: 10px;
-  color: var(--muted);
 }
 
 .future-empty {
@@ -1953,36 +1608,17 @@ onMounted(async () => {
   margin-top: 14px;
 }
 
-@media (max-width: 1180px) {
-  .future-layout {
-    grid-template-columns: 260px minmax(0, 1fr);
-  }
-
-  .direction-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
 @media (max-width: 900px) {
   .future-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .future-layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .vision-rail {
-    position: static;
-  }
-
-  .vision-list {
-    max-height: 260px;
-    overflow-y: auto;
-  }
-
   .vision-notes {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .vision-head-top {
+    flex-wrap: wrap;
   }
 }
 
@@ -2005,6 +1641,12 @@ onMounted(async () => {
 
   .vision-head-top {
     flex-direction: column;
+  }
+
+  .vision-selector-block,
+  .vision-select-wrap {
+    width: 100%;
+    max-width: none;
   }
 
   .future-empty {
@@ -2045,6 +1687,18 @@ onMounted(async () => {
   gap: 7px;
   flex-wrap: wrap;
   flex: none;
+}
+
+.tree-head-chevron-expanded {
+  transform: rotate(90deg);
+}
+
+.identity-map-actions .btn .icon {
+  transition: transform 0.18s var(--ease-out);
+}
+
+.identity-tree-body {
+  min-width: 0;
 }
 
 .identity-switcher {
@@ -2198,6 +1852,10 @@ onMounted(async () => {
   margin-top: 4px;
 }
 
+.identity-root-actions {
+  margin-left: 2px;
+}
+
 .identity-root-title-row h4 {
   font-family: var(--font-serif);
   font-size: 24px;
@@ -2241,6 +1899,50 @@ onMounted(async () => {
   font-weight: 650;
 }
 
+.identity-direction-manage {
+  width: fit-content;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.identity-direction-manage summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--ink-faint);
+  font-weight: 600;
+  list-style-position: inside;
+}
+
+.identity-direction-manage summary:hover {
+  color: var(--accent);
+}
+
+.identity-direction-manage-list {
+  display: grid;
+  gap: 5px;
+  min-width: min(420px, 100%);
+  margin-top: 8px;
+  padding: 7px;
+  border: 1px solid var(--line-faint);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+}
+
+.identity-direction-manage-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.identity-direction-manage-row .link-btn {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .identity-direction-summary {
   position: relative;
   margin: 14px 0 0 52px;
@@ -2279,32 +1981,45 @@ onMounted(async () => {
 
 .identity-direction-pills {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
   gap: 8px;
 }
 
-.identity-direction-pill {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-rows: auto auto;
+.identity-direction-item {
+  display: flex;
   align-items: center;
-  gap: 1px 10px;
-  padding: 11px 13px;
+  min-width: 0;
+  padding: 2px 4px 2px 0;
   border: 1px solid color-mix(in srgb, var(--direction-color) 24%, var(--line));
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--direction-color) 5%, var(--surface));
-  color: var(--ink-soft);
-  text-align: left;
   transition:
     border-color 0.16s ease,
     background-color 0.16s ease,
     transform 0.16s ease;
 }
 
-.identity-direction-pill:hover {
+.identity-direction-item:hover {
   border-color: var(--direction-color);
   background: color-mix(in srgb, var(--direction-color) 9%, var(--surface));
   transform: translateY(-1px);
+}
+
+.identity-direction-pill {
+  display: grid;
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  gap: 1px 10px;
+  padding: 11px 13px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ink-soft);
+  text-align: left;
 }
 
 .identity-direction-dot {
@@ -2335,6 +2050,16 @@ onMounted(async () => {
   grid-column: 3;
   grid-row: 1 / span 2;
   color: var(--direction-color);
+}
+
+.identity-direction-actions {
+  opacity: 0.62;
+  transition: opacity 0.16s ease;
+}
+
+.identity-direction-item:hover .identity-direction-actions,
+.identity-direction-actions:focus-within {
+  opacity: 1;
 }
 
 .direction-summary-empty {
@@ -2369,6 +2094,15 @@ onMounted(async () => {
   align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
+}
+
+.capability-tree-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: none;
 }
 
 .capability-tree-title {
@@ -2454,39 +2188,6 @@ onMounted(async () => {
   line-height: 1.7;
 }
 
-.direction-title-block {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.direction-identity {
-  color: var(--muted);
-  font-size: 10.5px;
-  line-height: 1.5;
-}
-
-.direction-card .direction-name {
-  font-size: 14px;
-}
-
-.direction-card .direction-desc {
-  font-size: 12.5px;
-}
-
-.direction-card .meta-label {
-  font-size: 10.5px;
-}
-
-.direction-card .meta-value {
-  font-size: 12px;
-}
-
-.direction-card .direction-days {
-  font-size: 11px;
-}
-
 @media (max-width: 1180px) {
   .identity-map-card {
     padding: 23px;
@@ -2504,6 +2205,10 @@ onMounted(async () => {
   }
 
   .identity-map-actions {
+    justify-content: flex-start;
+  }
+
+  .capability-tree-head-actions {
     justify-content: flex-start;
   }
 
@@ -2567,6 +2272,11 @@ onMounted(async () => {
     font-size: 21px;
   }
 
+  .identity-root-title-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
   .identity-root-statement {
     font-size: 14.5px;
   }
@@ -2580,6 +2290,10 @@ onMounted(async () => {
   .capability-empty-state {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .capability-tree-head-actions {
+    width: 100%;
   }
 
   .tree-legend {

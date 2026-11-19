@@ -5,8 +5,8 @@ import {
   type Competency,
   type Direction,
   type DirectionCompetency,
+  type Goal,
   type Identity,
-  type Milestone,
   type NewEntity,
   type Vision,
 } from '@/domain'
@@ -22,7 +22,7 @@ export interface IdentityCapabilityNode {
   children: IdentityCapabilityNode[]
   assignments: DirectionCompetency[]
   directions: Direction[]
-  milestoneCount: number
+  goalCount: number
   isDirect: boolean
 }
 
@@ -49,7 +49,7 @@ export function useFutureSelf() {
   const directions = ref<Direction[]>([])
   const competencies = ref<Competency[]>([])
   const directionCompetencies = ref<DirectionCompetency[]>([])
-  const milestones = ref<Milestone[]>([])
+  const goals = ref<Goal[]>([])
   const selectedVisionId = ref<string | null>(null)
   const includeArchived = ref(false)
 
@@ -82,7 +82,10 @@ export function useFutureSelf() {
               identity.visionId === selectedVision.value?.id &&
               (includeArchived.value || !identity.archivedAt),
           )
-          .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+          .sort(
+            (left, right) =>
+              left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+          )
       : [],
   )
 
@@ -108,9 +111,9 @@ export function useFutureSelf() {
     directionCompetencies.value.filter((relation) => !relation.archivedAt),
   )
 
-  const visibleMilestones = computed(() =>
-    milestones.value.filter(
-      (milestone) => includeArchived.value || !milestone.archivedAt,
+  const visibleGoals = computed(() =>
+    goals.value.filter(
+      (goal) => includeArchived.value || !goal.archivedAt,
     ),
   )
 
@@ -167,15 +170,6 @@ export function useFutureSelf() {
     return selectedIdentities.value.find((identity) => identity.id === identityId) ?? null
   }
 
-  function milestonesForIdentity(identityId: string): Milestone[] {
-    const directionIds = new Set(
-      directionsForIdentity(identityId).map((direction) => direction.id),
-    )
-    return visibleMilestones.value.filter((milestone) =>
-      directionIds.has(milestone.directionId),
-    )
-  }
-
   function capabilityTreeForIdentity(identityId: string): IdentityCapabilityNode[] {
     const identityDirections = directionsForIdentity(identityId)
     const directionIds = new Set(identityDirections.map((direction) => direction.id))
@@ -225,8 +219,14 @@ export function useFutureSelf() {
       const linkedDirections = identityDirections.filter((direction) =>
         linkedDirectionIds.has(direction.id),
       )
-      const milestoneCount = visibleMilestones.value.filter((milestone) =>
-        linkedDirectionIds.has(milestone.directionId),
+      const subtreeCompetencyIds = new Set<string>([competency.id])
+      const collectCompetencyIds = (node: IdentityCapabilityNode): void => {
+        subtreeCompetencyIds.add(node.competency.id)
+        node.children.forEach(collectCompetencyIds)
+      }
+      children.forEach(collectCompetencyIds)
+      const goalCount = visibleGoals.value.filter(
+        (goal) => goal.competencyId && subtreeCompetencyIds.has(goal.competencyId),
       ).length
 
       return {
@@ -234,7 +234,7 @@ export function useFutureSelf() {
         children,
         assignments,
         directions: linkedDirections,
-        milestoneCount,
+        goalCount,
         isDirect: assignments.length > 0,
       }
     }
@@ -259,6 +259,20 @@ export function useFutureSelf() {
     return count
   }
 
+  function goalCountForIdentity(identityId: string): number {
+    const competencyIds = new Set<string>()
+    const visit = (nodes: IdentityCapabilityNode[]): void => {
+      for (const node of nodes) {
+        competencyIds.add(node.competency.id)
+        visit(node.children)
+      }
+    }
+    visit(capabilityTreeForIdentity(identityId))
+    return visibleGoals.value.filter(
+      (goal) => goal.competencyId && competencyIds.has(goal.competencyId),
+    ).length
+  }
+
   async function refresh(): Promise<void> {
     loading.value = true
     error.value = null
@@ -269,21 +283,21 @@ export function useFutureSelf() {
         directionRows,
         competencyRows,
         directionCompetencyRows,
-        milestoneRows,
+        goalRows,
       ] = await Promise.all([
         repos.visions.list({ includeArchived: true }),
         repos.identities.list({ includeArchived: true }),
         repos.directions.list({ includeArchived: true }),
         repos.competencies.list({ includeArchived: true }),
         repos.directionCompetencies.list({ includeArchived: true }),
-        repos.milestones.list({ includeArchived: true }),
+        repos.goals.list({ includeArchived: true }),
       ])
       visions.value = visionRows
       identities.value = identityRows
       directions.value = directionRows
       competencies.value = competencyRows
       directionCompetencies.value = directionCompetencyRows
-      milestones.value = milestoneRows
+      goals.value = goalRows
 
       if (
         selectedVisionId.value &&
@@ -346,7 +360,7 @@ export function useFutureSelf() {
     directions,
     competencies,
     directionCompetencies,
-    milestones,
+    goals,
     includeArchived,
     selectedVisionId,
     selectedVision,
@@ -363,9 +377,9 @@ export function useFutureSelf() {
     countIdentities,
     directionsForIdentity,
     identityForDirection,
-    milestonesForIdentity,
     capabilityTreeForIdentity,
     capabilityCountForIdentity,
+    goalCountForIdentity,
     refresh,
     saveVision,
     saveIdentity,

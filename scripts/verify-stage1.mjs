@@ -107,8 +107,8 @@ try {
     focusTitle === '阅读 SAT 局部搜索论文',
     `今日重点排序异常：${focusTitle}`,
   )
-  await waitText(page, '独立完成 SAT 算法复现实验')
-  pass('今日重点与里程碑', focusTitle)
+  await waitText(page, '掌握 ACO 求解 SAT 的基本原理与实现')
+  pass('今日重点与近期目标', focusTitle)
 
   const heroShot = '/tmp/growth-os-home.png'
   await page.screenshot({ path: heroShot, fullPage: true })
@@ -144,7 +144,7 @@ try {
   const backupPath = await waitForFile(DOWNLOAD_DIR)
   const backup = JSON.parse(readFileSync(backupPath, 'utf8'))
   assert(backup.app === 'personal-growth-os', '备份 app 标识不正确')
-  assert(backup.schemaVersion === 4, '备份 schemaVersion 不正确')
+  assert(backup.schemaVersion === 5, '备份 schemaVersion 不正确')
   assert(Array.isArray(backup.data.visions) && backup.data.visions.length === 1, '备份缺少愿景')
   assert(Array.isArray(backup.data.tasks) && backup.data.tasks.length === 5, '备份任务数量异常')
   await waitText(page, '已导出')

@@ -193,6 +193,7 @@ export const FOREIGN_KEYS: Partial<Record<StoreName, ForeignKeyRule[]>> = {
   ],
   goals: [
     { field: 'parentGoalId', target: StoreName.GOALS, nullable: true, label: '父目标' },
+    { field: 'competencyId', target: StoreName.COMPETENCIES, nullable: true, label: '主能力' },
   ],
   tasks: [
     { field: 'parentTaskId', target: StoreName.TASKS, nullable: true, label: '父任务' },
