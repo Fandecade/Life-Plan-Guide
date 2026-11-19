@@ -1,0 +1,43 @@
+{
+  "name": "personal-growth-os",
+  "private": true,
+  "version": "0.6.0",
+  "type": "module",
+  "description": "Personal Growth OS - 个人成长与学习操作系统",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "verify:stage1": "node scripts/verify-stage1.mjs",
+    "verify:stage2": "node scripts/verify-stage2.mjs",
+    "verify:stage3": "node scripts/verify-stage3.mjs",
+    "verify:stage4": "node scripts/verify-stage4.mjs",
+    "verify:stage5": "node scripts/verify-stage5.mjs",
+    "verify:stage6": "node scripts/verify-stage6.mjs",
+    "verify:stage7": "node scripts/verify-stage7.mjs",
+    "verify:stage8": "node scripts/verify-stage8.mjs",
+    "verify:all": "node scripts/verify-stage1.mjs && node scripts/verify-stage2.mjs && node scripts/verify-stage3.mjs && node scripts/verify-stage4.mjs && node scripts/verify-stage5.mjs && node scripts/verify-stage6.mjs && node scripts/verify-stage7.mjs && node scripts/verify-stage8.mjs",
+    "verify:ui1": "node scripts/verify-ui1.mjs",
+    "verify:ui2": "node scripts/verify-ui2.mjs",
+    "verify:ui3": "node scripts/verify-ui3.mjs",
+    "verify:ui4": "node scripts/verify-ui4.mjs",
+    "verify:ui5": "node scripts/verify-ui5.mjs",
+    "verify:ui:all": "node scripts/verify-ui1.mjs && node scripts/verify-ui2.mjs && node scripts/verify-ui3.mjs && node scripts/verify-ui4.mjs && node scripts/verify-ui5.mjs && node scripts/verify-ui6.mjs",
+    "verify:ui6": "node scripts/verify-ui6.mjs"
+  },
+  "dependencies": {
+    "dexie": "^4.4.7",
+    "pinia": "^4.1.0",
+    "vue": "^3.5.45",
+    "vue-router": "^5.5.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@vitejs/plugin-vue": "^6.0.11",
+    "puppeteer-core": "^25.18.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.8",
+    "vue-tsc": "^3.3.14"
+  }
+}
