@@ -9,6 +9,7 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
+    "verify:smoke": "node scripts/verify-smoke.mjs",
     "verify:stage1": "node scripts/verify-stage1.mjs",
     "verify:stage2": "node scripts/verify-stage2.mjs",
     "verify:stage3": "node scripts/verify-stage3.mjs",
@@ -39,5 +40,10 @@
     "typescript": "^6.0.3",
     "vite": "^8.3.8",
     "vue-tsc": "^3.3.14"
+  },
+  "packageManager": "pnpm@11.28.4",
+  "engines": {
+    "node": ">=22.12",
+    "pnpm": ">=10"
   }
 }

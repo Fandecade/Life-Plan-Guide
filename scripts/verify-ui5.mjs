@@ -1,9 +1,9 @@
 import { setTimeout as delay } from 'node:timers/promises'
 import puppeteer from 'puppeteer-core'
+import { resolveChromePath } from './lib/chrome-path.mjs'
 
 const APP_URL = process.env.APP_URL ?? 'http://localhost:5173/'
-const CHROME_PATH =
-  process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+const CHROME_PATH = resolveChromePath()
 
 const ACO_GOAL = '掌握 ACO 求解 SAT 的基本原理与实现'
 const LINUX_GOAL = '掌握嵌入式 Linux 驱动开发'

@@ -1,10 +1,10 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
 import puppeteer from 'puppeteer-core'
+import { resolveChromePath } from './lib/chrome-path.mjs'
 
 const APP_URL = process.env.APP_URL ?? 'http://localhost:5173/'
-const CHROME_PATH =
-  process.env.CHROME_PATH ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+const CHROME_PATH = resolveChromePath()
 const DOWNLOAD_DIR = '/tmp/growth-os-downloads'
 
 function assert(condition, message) {
