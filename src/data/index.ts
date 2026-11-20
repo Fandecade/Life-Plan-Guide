@@ -37,3 +37,16 @@ export {
 } from './schema'
 export type { Repositories } from './repositories'
 export type { Repository } from './repository'
+export { onDataChange, emitDataChange, hasScope, type DataScope } from './events'
+export {
+  changeTaskStatus,
+  syncTaskActualDuration,
+  type TaskStatusChangeOptions,
+  type TaskStatusChangeResult,
+} from './taskService'
+export {
+  setTaskArchivedCascade,
+  setGoalArchivedCascade,
+  setCompetencyArchivedCascade,
+  setDirectionArchivedCascade,
+} from './cascade'

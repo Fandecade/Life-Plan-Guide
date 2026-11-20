@@ -4,6 +4,7 @@ import {
   FindingType,
   MilestoneStatus,
   TaskStatus,
+  computeGoalProgress,
   type Adjustment,
   type AdjustmentTargetType,
   type Direction,
@@ -27,8 +28,9 @@ import {
   type TaskGoal,
   type Timebox,
 } from '@/domain'
-import { repos } from '@/data'
+import { changeTaskStatus, repos } from '@/data'
 import { startOfDay, toDateInput, todayKey } from '@/utils/date'
+import { useDataRefresh } from './useDataRefresh'
 
 export type ReviewInput = Omit<NewEntity<Review>, 'id'>
 export type AdjustmentInput = Omit<NewEntity<Adjustment>, 'id'>
@@ -268,7 +270,7 @@ export function useReviews() {
     const completedTasksWeek = tasks.value.filter(
       (task) =>
         task.status === TaskStatus.COMPLETED &&
-        new Date(task.updatedAt).getTime() >= since,
+        new Date(task.completedAt ?? task.updatedAt).getTime() >= since,
     ).length
     const habitWeek = habitLogs.value.filter(
       (log) =>
@@ -298,7 +300,7 @@ export function useReviews() {
       const endTime = end.getTime()
 
       const taskCount = tasks.value.filter((task) => {
-        const time = new Date(task.updatedAt).getTime()
+        const time = new Date(task.completedAt ?? task.updatedAt).getTime()
         return task.status === TaskStatus.COMPLETED && time >= startTime && time < endTime
       }).length
       const habitCount = habitLogs.value.filter((log) => {
@@ -433,7 +435,7 @@ export function useReviews() {
         (keyInRange(task.scheduledDate, range.startKey, range.endKey) ||
           keyInRange(task.dueDate, range.startKey, range.endKey) ||
           (task.status === TaskStatus.COMPLETED &&
-            keyInRange(task.updatedAt, range.startKey, range.endKey))),
+            keyInRange(task.completedAt ?? task.updatedAt, range.startKey, range.endKey))),
     )
     const completedTasks = taskRows.filter((task) => task.status === TaskStatus.COMPLETED)
     const incompleteTasks = taskRows.filter(
@@ -552,7 +554,7 @@ export function useReviews() {
         (task) =>
           !task.archivedAt &&
           task.status === TaskStatus.COMPLETED &&
-          keyInRange(task.updatedAt, startKey, endKey),
+          keyInRange(task.completedAt ?? task.updatedAt, startKey, endKey),
       )
       const timeboxRows = timeboxes.value.filter(
         (row) => !row.archivedAt && keyInRange(row.plannedStart, startKey, endKey),
@@ -602,19 +604,14 @@ export function useReviews() {
         const milestoneDone = linkedMilestones.filter(
           (milestone) => milestone.status === MilestoneStatus.COMPLETED,
         ).length
-        const taskRatio = linkedTasks.length ? taskDone / linkedTasks.length : null
-        const milestoneRatio = linkedMilestones.length
-          ? milestoneDone / linkedMilestones.length
-          : null
-        const progress = Math.round(
-          (goal.progressMode === 'MANUAL'
-            ? goal.manualProgress
-            : goal.progressMode === 'MILESTONE_BASED' && milestoneRatio !== null
-              ? milestoneRatio * 100
-              : taskRatio !== null
-                ? taskRatio * 100
-                : goal.manualProgress) ?? 0,
-        )
+        const progress = computeGoalProgress({
+          goal,
+          goals: goals.value,
+          tasks: tasks.value,
+          taskGoals: taskGoals.value,
+          milestones: milestones.value,
+          goalMilestones: goalMilestones.value,
+        })
         return {
           id: goal.id,
           title: goal.title,
@@ -717,8 +714,8 @@ export function useReviews() {
     return map
   })
 
-  async function refresh(): Promise<void> {
-    loading.value = true
+  async function reload(silent = false): Promise<void> {
+    if (!silent) loading.value = true
     error.value = null
     try {
       const [
@@ -848,12 +845,15 @@ export function useReviews() {
 
     if (adjustment.targetType === 'TASK') {
       const patch: Record<string, unknown> = {}
-      if (adjustment.field === 'status') patch.status = value
-      else if (adjustment.field === 'dueDate') patch.dueDate = value
+      if (adjustment.field === 'status') {
+        await changeTaskStatus(adjustment.targetId, value as TaskStatus)
+      } else if (adjustment.field === 'dueDate') patch.dueDate = value
       else if (adjustment.field === 'scheduledDate') patch.scheduledDate = value
       else if (adjustment.field === 'estimatedDuration') patch.estimatedDuration = Number(value)
       else throw new Error('不支持的任务字段')
-      await repos.tasks.update(adjustment.targetId, patch)
+      if (adjustment.field !== 'status') {
+        await repos.tasks.update(adjustment.targetId, patch)
+      }
     } else if (adjustment.targetType === 'GOAL') {
       const patch: Record<string, unknown> = {}
       if (adjustment.field === 'status') patch.status = value
@@ -947,6 +947,17 @@ export function useReviews() {
     }
     return '—'
   }
+
+  async function refresh(): Promise<void> {
+    await reload()
+  }
+
+  useDataRefresh(
+    ['task', 'goal', 'milestone', 'direction', 'review', 'habit', 'learning', 'evidence', 'competency'],
+    () => {
+      void reload(true)
+    },
+  )
 
   return {
     loading,

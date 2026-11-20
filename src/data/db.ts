@@ -76,11 +76,20 @@ const V3_STORES = {
   dataExports: 'id, exportType, status, createdAt, updatedAt',
 } as const
 
-const CURRENT_STORES = {
+const V5_STORES = {
   ...V3_STORES,
   milestones:
     'id, directionId, competencyId, status, dueDate, importance, createdAt, updatedAt, archivedAt',
 }
+
+const V6_STORES = {
+  ...V5_STORES,
+  tasks:
+    'id, parentTaskId, status, taskType, scheduledDate, dueDate, priority, completedAt, createdAt, updatedAt, archivedAt',
+  evidences: 'id, evidenceType, taskId, createdAt, updatedAt, archivedAt',
+}
+
+const CURRENT_STORES = V6_STORES
 
 export class GrowthDatabase extends Dexie {
   visions!: Table<Vision, string>
@@ -140,9 +149,9 @@ export class GrowthDatabase extends Dexie {
         })
     })
 
-    this.version(SCHEMA_VERSION).stores(CURRENT_STORES)
+    this.version(5).stores(V5_STORES)
 
-    this.version(SCHEMA_VERSION).upgrade(async (transaction) => {
+    this.version(5).upgrade(async (transaction) => {
       await transaction
         .table<Milestone>('milestones')
         .toCollection()
@@ -157,6 +166,43 @@ export class GrowthDatabase extends Dexie {
         .modify((goal) => {
           if (goal.competencyId === undefined) {
             goal.competencyId = null
+          }
+        })
+    })
+
+    this.version(6).stores(V6_STORES)
+
+    this.version(6).upgrade(async (transaction) => {
+      await transaction
+        .table<Task>('tasks')
+        .toCollection()
+        .modify((task) => {
+          if (task.completedAt === undefined) {
+            task.completedAt = task.status === 'COMPLETED' ? task.updatedAt : null
+          }
+        })
+      await transaction
+        .table<Evidence>('evidences')
+        .toCollection()
+        .modify((evidence) => {
+          if (evidence.taskId === undefined) {
+            evidence.taskId = null
+          }
+        })
+    })
+
+    this.version(SCHEMA_VERSION).stores(CURRENT_STORES)
+
+    this.version(SCHEMA_VERSION).upgrade(async (transaction) => {
+      await transaction
+        .table<Timebox>('timeboxes')
+        .toCollection()
+        .modify((timebox) => {
+          if (timebox.kind === undefined) {
+            timebox.kind = 'TASK'
+          }
+          if (timebox.reviewScheduleId === undefined) {
+            timebox.reviewScheduleId = null
           }
         })
     })

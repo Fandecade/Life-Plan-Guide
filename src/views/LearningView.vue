@@ -16,11 +16,13 @@ import {
   LearningRecordType,
   ResourceType,
   SessionStatus,
+  TaskStatus,
   TaskType,
   learningRecordTypeLabels,
   resourceTypeLabels,
   reviewScheduleStatusLabels,
   sessionStatusLabels,
+
   taskTypeLabels,
   type LearningRecord,
   type LearningSession,
@@ -44,6 +46,7 @@ const {
   activeWorkflows,
   activeResources,
   availableTasks,
+  learningTasks,
   activeSession,
   activeWorkflow,
   activeStage,
@@ -52,7 +55,9 @@ const {
   elapsedMinutes,
   taskById,
   workflowById,
+  knowledgeById,
   recordsBySession,
+  taskLearningStats,
   dueReviews,
   upcomingReviews,
   completedReviews,
@@ -116,7 +121,7 @@ const sessionStatusClass = (status: SessionStatus): string =>
   `session-${status.toLowerCase()}`
 
 function initStartDefaults(): void {
-  if (!startTaskId.value) startTaskId.value = availableTasks.value[0]?.id ?? ''
+  if (!startTaskId.value) startTaskId.value = learningTasks.value[0]?.id ?? ''
   if (!startWorkflowId.value) startWorkflowId.value = activeWorkflows.value[0]?.id ?? ''
 }
 
@@ -156,6 +161,24 @@ function taskTitle(taskId: string | null): string {
 function workflowName(workflowId: string | null): string {
   if (!workflowId) return '未选择流程'
   return workflowById.value[workflowId]?.name ?? '流程已不存在'
+}
+
+function reviewLabel(schedule: ReviewSchedule): string {
+  if (schedule.taskId) return taskTitle(schedule.taskId)
+  if (schedule.knowledgeItemId) {
+    return knowledgeById.value[schedule.knowledgeItemId]?.title ?? '知识点已不存在'
+  }
+  return '复习提醒'
+}
+
+function learningTaskLabel(task: Task): string {
+  const stats = taskLearningStats.value[task.id]
+  if (!stats) return ''
+  const parts: string[] = []
+  if (stats.completedSessions > 0) parts.push(`已学 ${stats.completedSessions} 次`)
+  if (stats.pendingReviews > 0) parts.push(`待复习 ${stats.pendingReviews}`)
+  if (!parts.length) return ''
+  return ` · ${parts.join(' · ')}`
 }
 
 const currentStageIndex = computed(() => {
@@ -382,7 +405,11 @@ async function submitRecord(): Promise<void> {
 
 
 const finishOpen = ref(false)
-const finishForm = reactive({ actualAssessment: 2, reflection: '' })
+const finishForm = reactive({
+  actualAssessment: 2,
+  reflection: '',
+  taskStatusAfter: null as TaskStatus | null,
+})
 const finishing = ref(false)
 
 interface CompletionOutcome {
@@ -404,6 +431,13 @@ const completionOutcome = ref<CompletionOutcome | null>(null)
 function openFinish(): void {
   finishForm.actualAssessment = 2
   finishForm.reflection = ''
+  const task = activeSession.value?.taskId
+    ? taskById.value[activeSession.value.taskId]
+    : null
+  finishForm.taskStatusAfter =
+    task && (task.status === TaskStatus.TODO || task.status === TaskStatus.BACKLOG)
+      ? TaskStatus.IN_PROGRESS
+      : null
   finishOpen.value = true
 }
 
@@ -421,6 +455,7 @@ async function submitFinish(): Promise<void> {
       status: SessionStatus.COMPLETED,
       actualAssessment: finishForm.actualAssessment,
       reflection: finishForm.reflection,
+      taskStatusAfter: finishForm.taskStatusAfter,
     })
     finishOpen.value = false
     stopClock()
@@ -699,7 +734,7 @@ async function submitSchedule(): Promise<void> {
   try {
     await saveTaskReview(scheduleForm.taskId, scheduledAtFromDate(scheduleForm.scheduledDate))
     scheduleModalOpen.value = false
-    success('复习提醒已安排，时间盒已同步')
+    success('复习提醒已安排')
   } catch (caught) {
     formError.value = caught instanceof Error ? caught.message : String(caught)
   } finally {
@@ -707,19 +742,40 @@ async function submitSchedule(): Promise<void> {
   }
 }
 
-async function handleCompleteReview(schedule: ReviewSchedule): Promise<void> {
+const reviewModalOpen = ref(false)
+const reviewTarget = ref<ReviewSchedule | null>(null)
+const reviewSubmitting = ref(false)
+const reviewForm = reactive({ recallResult: 3, markTaskComplete: false })
+
+function openCompleteReview(schedule: ReviewSchedule): void {
+  reviewTarget.value = schedule
+  reviewForm.recallResult = 3
+  reviewForm.markTaskComplete = false
+  reviewModalOpen.value = true
+}
+
+async function submitCompleteReview(): Promise<void> {
+  const target = reviewTarget.value
+  if (!target) return
+  reviewSubmitting.value = true
   try {
-    await completeReview(schedule)
-    success('复习已完成，任务已标记完成')
+    await completeReview(target, {
+      recallResult: reviewForm.recallResult,
+      markTaskComplete: reviewForm.markTaskComplete,
+    })
+    reviewModalOpen.value = false
+    success('复习已完成，下一次复习已自动安排')
   } catch (caught) {
     toastError(caught instanceof Error ? caught.message : String(caught))
+  } finally {
+    reviewSubmitting.value = false
   }
 }
 
 async function handleRevertReview(schedule: ReviewSchedule): Promise<void> {
   try {
     await revertReview(schedule)
-    success('任务已恢复为未完成，复习记录保留')
+    success('复习已撤销，下一次复习安排已移除')
   } catch (caught) {
     toastError(caught instanceof Error ? caught.message : String(caught))
   }
@@ -728,7 +784,7 @@ async function handleRevertReview(schedule: ReviewSchedule): Promise<void> {
 async function handleSkipReview(schedule: ReviewSchedule): Promise<void> {
   try {
     await skipReview(schedule.id)
-    success('复习提醒已取消，对应时间盒已移除')
+    success('复习提醒已取消')
   } catch (caught) {
     toastError(caught instanceof Error ? caught.message : String(caught))
   }
@@ -909,7 +965,7 @@ onMounted(async () => {
   }
   const taskParam = String(route.query.task ?? '')
   if (taskParam) {
-    const task = availableTasks.value.find((item) => item.id === taskParam)
+    const task = learningTasks.value.find((item) => item.id === taskParam)
     if (task) {
       activeView.value = 'workbench'
       startTaskId.value = task.id
@@ -1312,7 +1368,7 @@ onUnmounted(() => {
             </p>
           </div>
 
-          <div v-if="availableTasks.length === 0" class="start-empty">
+          <div v-if="learningTasks.length === 0" class="start-empty">
             <EmptyState
               title="没有可学习的任务"
               description="先到“目标与任务”创建一个未完成的任务，再回来开始学习。"
@@ -1336,8 +1392,8 @@ onUnmounted(() => {
               <div class="field">
                 <label class="field-label" for="start-task">学习任务</label>
                 <select id="start-task" v-model="startTaskId" class="select">
-                  <option v-for="task in availableTasks" :key="task.id" :value="task.id">
-                    {{ task.title }}{{ task.status === 'COMPLETED' ? '（已完成）' : '' }}
+                  <option v-for="task in learningTasks" :key="task.id" :value="task.id">
+                    {{ task.title }}{{ learningTaskLabel(task) }}
                   </option>
                 </select>
               </div>
@@ -1502,7 +1558,7 @@ onUnmounted(() => {
               <AppIcon name="refresh" :size="16" />
               任务复习提醒
             </h3>
-            <p class="section-note">每次完成学习会自动生成一次提醒；到期只用于提醒，完成复习会把对应任务标记完成。</p>
+            <p class="section-note">每次完成学习会自动生成复习提醒并同步到时间盒；完成后时间盒一并收口，并自动安排下一次复习。</p>
           </div>
           <button class="btn btn-sm btn-secondary" @click="openScheduleCreate()">
             <AppIcon name="plus" :size="14" />
@@ -1526,15 +1582,17 @@ onUnmounted(() => {
           <ul v-else class="review-list">
             <li v-for="row in dueReviews" :key="row.id" class="review-row">
               <div class="review-main">
-                <span class="review-name">{{ taskTitle(row.taskId ?? null) }}</span>
+                <span class="review-name">{{ reviewLabel(row) }}</span>
                 <div class="review-meta">
                   <span>{{ formatShortDate(row.scheduledAt) }} 到期（{{ relativeDay(row.scheduledAt) }}）</span>
-                  <span>完成后会把任务标记为完成</span>
+                  <span v-if="row.timeboxId">时间盒已同步到今日日历</span>
+                  <span v-else>未关联时间盒</span>
+                  <span>完成后会记录回忆评分，并自动安排下一次复习</span>
                 </div>
               </div>
               <div class="review-actions">
                 <button class="btn btn-sm btn-ghost" @click="handleSkipReview(row)">取消提醒</button>
-                <button class="btn btn-sm btn-primary" @click="handleCompleteReview(row)">完成复习</button>
+                <button class="btn btn-sm btn-primary" @click="openCompleteReview(row)">完成复习</button>
               </div>
             </li>
           </ul>
@@ -1556,9 +1614,10 @@ onUnmounted(() => {
           <ul v-else class="review-list compact">
             <li v-for="row in upcomingReviews.slice(0, 6)" :key="row.id" class="review-row">
               <div class="review-main">
-                <span class="review-name">{{ taskTitle(row.taskId ?? null) }}</span>
+                <span class="review-name">{{ reviewLabel(row) }}</span>
                 <div class="review-meta">
                   <span>{{ formatDate(row.scheduledAt) }}（{{ relativeDay(row.scheduledAt) }}）</span>
+                  <span v-if="row.timeboxId">时间盒已安排</span>
                 </div>
               </div>
               <div class="review-actions">
@@ -1580,10 +1639,11 @@ onUnmounted(() => {
           <ul v-else class="review-list compact">
             <li v-for="row in completedReviews.slice(0, 8)" :key="row.id" class="review-row">
               <div class="review-main">
-                <span class="review-name">{{ taskTitle(row.taskId ?? null) }}</span>
+                <span class="review-name">{{ reviewLabel(row) }}</span>
                 <div class="review-meta">
                   <span>{{ formatDateTime(row.completedAt) }}</span>
-                  <span>任务已标记完成</span>
+                  <span>回忆评分 {{ row.recallResult ?? '—' }} / 4 · 下次 {{ formatShortDate(row.nextReviewAt, '待定') }}</span>
+                  <span v-if="row.timeboxId">时间盒已完成</span>
                 </div>
               </div>
               <div class="review-actions">
@@ -1723,6 +1783,17 @@ onUnmounted(() => {
           <label class="field-label" for="finish-reflection">反思（可选）</label>
           <textarea id="finish-reflection" v-model="finishForm.reflection" class="textarea" placeholder="哪些内容不能独立回忆？发现了什么知识盲区？" />
           <span class="field-hint">如果填写，会生成一条“反思”学习记录。</span>
+        </div>
+        <div class="field">
+          <label class="field-label" for="finish-task-status">学习后任务状态</label>
+          <select id="finish-task-status" v-model="finishForm.taskStatusAfter" class="select">
+            <option :value="null">保持当前状态</option>
+            <option :value="TaskStatus.IN_PROGRESS">标记为进行中</option>
+            <option :value="TaskStatus.COMPLETED">标记为已完成</option>
+          </select>
+          <span class="field-hint">
+            完成后会同步到目标与任务；选择已完成还会沉淀证据并推进目标进度。
+          </span>
         </div>
         <div class="modal-actions">
           <button class="btn btn-secondary" @click="finishOpen = false">继续学习</button>
@@ -1871,14 +1942,14 @@ onUnmounted(() => {
     </ModalDialog>
 
 
-    <ModalDialog :open="scheduleModalOpen" title="安排复习" subtitle="复习只是一个提醒时间；到期后完成复习会把对应任务标记完成。" @close="scheduleModalOpen = false">
+    <ModalDialog :open="scheduleModalOpen" title="安排复习" subtitle="复习只是提醒时间；完成时记录回忆评分，并自动安排下一次复习。" @close="scheduleModalOpen = false">
       <form class="form" @submit.prevent="submitSchedule">
         <div class="field">
           <label class="field-label" for="schedule-task">任务</label>
           <select id="schedule-task" v-model="scheduleForm.taskId" class="select">
             <option value="" disabled>请选择任务</option>
             <option v-for="task in availableTasks" :key="task.id" :value="task.id">
-              {{ task.title }}{{ task.status === 'COMPLETED' ? '（已完成）' : '' }}
+              {{ task.title }}{{ task.status === 'COMPLETED' ? '（已完成）' : '' }}{{ learningTaskLabel(task) }}
             </option>
           </select>
         </div>
@@ -1886,12 +1957,51 @@ onUnmounted(() => {
           <label class="field-label" for="schedule-date">复习日期</label>
           <input id="schedule-date" v-model="scheduleForm.scheduledDate" class="input" type="date" />
         </div>
-        <p class="field-hint">会在同一天 20:00 到期，并在时间盒里生成一条 30 分钟的复习提醒。</p>
+        <p class="field-hint">会在同一天 20:00 到期，并在待复习列表中提醒你。</p>
         <p v-if="formError" class="form-error">{{ formError }}</p>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" @click="scheduleModalOpen = false">取消</button>
           <button type="submit" class="btn btn-primary" :disabled="saving">
             {{ saving ? '保存中…' : '安排复习' }}
+          </button>
+        </div>
+      </form>
+    </ModalDialog>
+
+    <ModalDialog
+      :open="reviewModalOpen"
+      title="完成复习"
+      subtitle="回忆越困难，下一次复习间隔越短。"
+      @close="reviewModalOpen = false"
+    >
+      <form class="form" @submit.prevent="submitCompleteReview">
+        <div class="field">
+          <span class="field-label">回忆程度</span>
+          <div class="relation-options">
+            <label
+              v-for="option in [
+                { value: 1, label: '1 · 想不起来' },
+                { value: 2, label: '2 · 想起来一部分' },
+                { value: 3, label: '3 · 基本记得' },
+                { value: 4, label: '4 · 很熟练' },
+              ]"
+              :key="option.value"
+              class="relation-option"
+              :class="{ selected: reviewForm.recallResult === option.value }"
+            >
+              <input v-model="reviewForm.recallResult" type="radio" :value="option.value" />
+              <span>{{ option.label }}</span>
+            </label>
+          </div>
+        </div>
+        <label class="check-row">
+          <input v-model="reviewForm.markTaskComplete" type="checkbox" />
+          <span>本次复习同时把原任务标记为完成</span>
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" @click="reviewModalOpen = false">取消</button>
+          <button type="submit" class="btn btn-primary" :disabled="reviewSubmitting">
+            {{ reviewSubmitting ? '提交中…' : '完成复习' }}
           </button>
         </div>
       </form>
@@ -1991,6 +2101,39 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.relation-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.relation-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.relation-option.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--ink);
+}
+
+.check-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
 .header-actions {
   display: flex;
   align-items: center;

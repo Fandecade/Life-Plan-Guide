@@ -468,6 +468,7 @@ onMounted(() => {
               <button class="schedule-copy schedule-open" @click="openTask(item.taskId)">
                 <span class="schedule-title">{{ item.title }}</span>
                 <span class="schedule-meta">
+                  <span v-if="item.isReview" class="badge badge-accent">复习</span>
                   <span v-if="item.taskType" class="badge">{{ taskTypeLabels[item.taskType] }}</span>
                   <span>{{ formatDuration(item.duration) }}</span>
                   <span>· {{ item.statusLabel }}</span>

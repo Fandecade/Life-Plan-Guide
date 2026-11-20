@@ -10,7 +10,8 @@ import {
   type NewEntity,
   type Vision,
 } from '@/domain'
-import { repos } from '@/data'
+import { emitDataChange, repos, setDirectionArchivedCascade } from '@/data'
+import { useDataRefresh } from './useDataRefresh'
 
 export type VisionInput = Omit<NewEntity<Vision>, 'id'>
 export type IdentityInput = Omit<NewEntity<Identity>, 'id'>
@@ -273,8 +274,8 @@ export function useFutureSelf() {
     ).length
   }
 
-  async function refresh(): Promise<void> {
-    loading.value = true
+  async function reload(silent = false): Promise<void> {
+    if (!silent) loading.value = true
     error.value = null
     try {
       const [
@@ -318,6 +319,7 @@ export function useFutureSelf() {
       : await repos.visions.create(input)
     await refresh()
     selectedVisionId.value = entity.id
+    emitDataChange('vision')
     return entity
   }
 
@@ -326,6 +328,7 @@ export function useFutureSelf() {
       ? await repos.identities.update(id, input)
       : await repos.identities.create(input)
     await refresh()
+    emitDataChange('identity', 'direction')
     return entity
   }
 
@@ -334,6 +337,7 @@ export function useFutureSelf() {
       ? await repos.directions.update(id, input)
       : await repos.directions.create(input)
     await refresh()
+    emitDataChange('direction', 'competency')
     return entity
   }
 
@@ -347,10 +351,25 @@ export function useFutureSelf() {
     } else if (kind === 'identity') {
       archived ? await repos.identities.archive(id) : await repos.identities.restore(id)
     } else {
-      archived ? await repos.directions.archive(id) : await repos.directions.restore(id)
+      await setDirectionArchivedCascade(id, archived)
+      return
     }
     await refresh()
+    emitDataChange(
+      kind === 'vision' ? 'vision' : kind === 'identity' ? 'identity' : 'direction',
+    )
   }
+
+  async function refresh(): Promise<void> {
+    await reload()
+  }
+
+  useDataRefresh(
+    ['vision', 'identity', 'direction', 'competency', 'goal', 'milestone'],
+    () => {
+      void reload(true)
+    },
+  )
 
   return {
     loading,

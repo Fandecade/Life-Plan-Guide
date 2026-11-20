@@ -1,9 +1,10 @@
 import { computed, ref } from 'vue'
 import {
   GoalStatus,
-  ProgressMode,
 
   TaskStatus,
+  computeGoalProgress,
+  computeGoalTaskStats,
   type Goal,
   type GoalDirection,
   type GoalMilestone,
@@ -18,8 +19,16 @@ import {
   type Direction,
   type Competency,
 } from '@/domain'
-import { repos } from '@/data'
+import {
+  changeTaskStatus,
+  emitDataChange,
+  repos,
+  setGoalArchivedCascade,
+  setTaskArchivedCascade,
+  syncTaskActualDuration,
+} from '@/data'
 import { addDays, endOfDay, isSameDay, startOfDay } from '@/utils/date'
+import { useDataRefresh } from './useDataRefresh'
 
 export type GoalInput = Omit<NewEntity<Goal>, 'id'>
 export type TaskInput = Omit<NewEntity<Task>, 'id'>
@@ -50,9 +59,6 @@ const priorityRank: Record<string, number> = {
   LOW: 1,
 }
 
-function clampPercent(value: number): number {
-  return Math.max(0, Math.min(100, Math.round(value)))
-}
 
 export function useGoalsTasks() {
   const loading = ref(true)
@@ -152,40 +158,11 @@ export function useGoalsTasks() {
     return map
   })
 
-  function goalSubtreeIds(goalId: string): string[] {
-    const ids: string[] = []
-    const queue = [goalId]
-    const visited = new Set<string>()
-    while (queue.length > 0) {
-      const currentId = queue.shift()
-      if (!currentId || visited.has(currentId)) continue
-      visited.add(currentId)
-      ids.push(currentId)
-      for (const goal of goals.value) {
-        if (goal.parentGoalId === currentId) queue.push(goal.id)
-      }
-    }
-    return ids
-  }
-
-  function taskIdsForGoalTree(goalId: string): string[] {
-    const goalIds = new Set(goalSubtreeIds(goalId))
-    return Object.entries(taskGoalIds.value)
-      .filter(([, linkedGoalIds]) => linkedGoalIds.some((id) => goalIds.has(id)))
-      .map(([taskId]) => taskId)
-  }
 
   const goalTaskStats = computed<Record<string, { total: number; done: number }>>(() => {
     const map: Record<string, { total: number; done: number }> = {}
-    const taskMap = new Map(tasks.value.map((task) => [task.id, task]))
     for (const goal of goals.value) {
-      map[goal.id] = { total: 0, done: 0 }
-      for (const taskId of taskIdsForGoalTree(goal.id)) {
-        const task = taskMap.get(taskId)
-        if (!task || task.archivedAt || task.status === TaskStatus.CANCELLED) continue
-        map[goal.id].total += 1
-        if (task.status === TaskStatus.COMPLETED) map[goal.id].done += 1
-      }
+      map[goal.id] = computeGoalTaskStats(goal, goals.value, tasks.value, taskGoals.value)
     }
     return map
   })
@@ -206,8 +183,12 @@ export function useGoalsTasks() {
     monday.setDate(monday.getDate() - (day - 1))
     const nextMonday = new Date(monday)
     nextMonday.setDate(nextMonday.getDate() + 7)
+    const archivedTaskIds = new Set(
+      tasks.value.filter((task) => task.archivedAt).map((task) => task.id),
+    )
     const weekMinutes = timeboxes.value
       .filter((timebox) => {
+        if (timebox.archivedAt || archivedTaskIds.has(timebox.taskId)) return false
         const start = new Date(timebox.plannedStart).getTime()
         return start >= monday.getTime() && start < nextMonday.getTime()
       })
@@ -223,23 +204,14 @@ export function useGoalsTasks() {
   })
 
   function progressForGoal(goal: Goal): number {
-    if (goal.progressMode === ProgressMode.MANUAL) {
-      return clampPercent(goal.manualProgress)
-    }
-
-    const ids = taskIdsForGoalTree(goal.id)
-    const taskMap = new Map(tasks.value.map((task) => [task.id, task]))
-    let totalWeight = 0
-    let completedWeight = 0
-    for (const id of ids) {
-      const task = taskMap.get(id)
-      if (!task || task.archivedAt || task.status === TaskStatus.CANCELLED) continue
-      const weight = task.estimatedDuration > 0 ? task.estimatedDuration : 30
-      totalWeight += weight
-      if (task.status === TaskStatus.COMPLETED) completedWeight += weight
-    }
-    if (totalWeight === 0) return 0
-    return clampPercent((completedWeight / totalWeight) * 100)
+    return computeGoalProgress({
+      goal,
+      goals: goals.value,
+      tasks: tasks.value,
+      taskGoals: taskGoals.value,
+      milestones: milestones.value,
+      goalMilestones: goalMilestones.value,
+    })
   }
 
   function sortTaskNodes(nodes: TaskNode[]): TaskNode[] {
@@ -317,8 +289,8 @@ export function useGoalsTasks() {
     )
   }
 
-  async function refresh(): Promise<void> {
-    loading.value = true
+  async function reload(silent = false): Promise<void> {
+    if (!silent) loading.value = true
     error.value = null
     try {
       const [
@@ -375,8 +347,46 @@ export function useGoalsTasks() {
       ? await repos.goals.update(id, input)
       : await repos.goals.create(input)
 
+    emitDataChange('goal')
     await refresh()
     return entity
+  }
+
+  async function saveGoalRelations(
+    goalId: string,
+    milestoneIds: string[],
+    directionIds: string[],
+  ): Promise<void> {
+    const existingMilestones = activeRelations.goalMilestones.value.filter(
+      (row) => row.goalId === goalId,
+    )
+    for (const row of existingMilestones) {
+      if (!milestoneIds.includes(row.milestoneId)) {
+        await repos.goalMilestones.remove(row.id)
+      }
+    }
+    for (const milestoneId of milestoneIds) {
+      if (!existingMilestones.some((row) => row.milestoneId === milestoneId)) {
+        await repos.goalMilestones.create({ goalId, milestoneId })
+      }
+    }
+
+    const existingDirections = activeRelations.goalDirections.value.filter(
+      (row) => row.goalId === goalId,
+    )
+    for (const row of existingDirections) {
+      if (!directionIds.includes(row.directionId)) {
+        await repos.goalDirections.remove(row.id)
+      }
+    }
+    for (const directionId of directionIds) {
+      if (!existingDirections.some((row) => row.directionId === directionId)) {
+        await repos.goalDirections.create({ goalId, directionId })
+      }
+    }
+
+    await refresh()
+    emitDataChange('goal', 'milestone', 'direction')
   }
 
   async function saveTask(
@@ -416,11 +426,12 @@ export function useGoalsTasks() {
     }
 
     await refresh()
+    emitDataChange('task', 'goal')
     return entity
   }
 
   async function setTaskStatus(id: string, status: TaskStatus): Promise<void> {
-    await repos.tasks.update(id, { status })
+    await changeTaskStatus(id, status)
     await refresh()
   }
 
@@ -464,17 +475,7 @@ export function useGoalsTasks() {
       })
     }
     await refresh()
-  }
-
-  async function syncTaskActualDuration(taskId: string): Promise<void> {
-    const rows = await repos.timeboxes.list({ includeArchived: true })
-    const total = rows
-      .filter((row) => row.taskId === taskId && row.status === 'COMPLETED')
-      .reduce((sum, row) => sum + row.actualDuration, 0)
-    const task = await repos.tasks.get(taskId)
-    if (task && task.actualDuration !== total) {
-      await repos.tasks.update(taskId, { actualDuration: total })
-    }
+    emitDataChange('task')
   }
 
   async function saveTimebox(input: TimeboxInput, id?: string): Promise<Timebox> {
@@ -499,6 +500,7 @@ export function useGoalsTasks() {
       : await repos.timeboxes.create(payload)
     await syncTaskActualDuration(entity.taskId)
     await refresh()
+    emitDataChange('timebox', 'task')
     return entity
   }
 
@@ -552,6 +554,7 @@ export function useGoalsTasks() {
     })
     await syncTaskActualDuration(row.taskId)
     await refresh()
+    emitDataChange('timebox', 'task')
   }
 
   async function deleteTimebox(id: string): Promise<void> {
@@ -560,13 +563,14 @@ export function useGoalsTasks() {
     await repos.timeboxes.remove(id)
     await syncTaskActualDuration(row.taskId)
     await refresh()
+    emitDataChange('timebox', 'task')
   }
 
   async function setArchived(kind: GoalsTasksKind, id: string, archived: boolean): Promise<void> {
     if (kind === 'goal') {
-      archived ? await repos.goals.archive(id) : await repos.goals.restore(id)
+      await setGoalArchivedCascade(id, archived)
     } else {
-      archived ? await repos.tasks.archive(id) : await repos.tasks.restore(id)
+      await setTaskArchivedCascade(id, archived)
     }
     await refresh()
   }
@@ -653,6 +657,17 @@ export function useGoalsTasks() {
       .sort((left, right) => left.plannedStart.localeCompare(right.plannedStart))
   }
 
+  async function refresh(): Promise<void> {
+    await reload()
+  }
+
+  useDataRefresh(
+    ['task', 'goal', 'timebox', 'milestone', 'review', 'evidence', 'competency'],
+    () => {
+      void reload(true)
+    },
+  )
+
   return {
     loading,
     error,
@@ -686,6 +701,7 @@ export function useGoalsTasks() {
     goalDescendants,
     refresh,
     saveGoal,
+    saveGoalRelations,
     saveTask,
     setTaskStatus,
     setTaskQuadrant,

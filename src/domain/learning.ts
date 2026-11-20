@@ -70,6 +70,7 @@ export interface ReviewSchedule extends BaseEntity {
   sessionId?: string | null
   timeboxId?: string | null
   previousTaskStatus?: string | null
+  nextScheduleId?: string | null
   scheduledAt: string
   completedAt: string | null
   recallResult: number | null

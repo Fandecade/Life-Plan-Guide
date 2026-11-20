@@ -8,6 +8,7 @@ export interface Evidence extends BaseEntity {
   fileUrl: string
   externalUrl: string
   qualityNote: string
+  taskId: string | null
 }
 
 export interface Resource extends BaseEntity {

@@ -43,6 +43,7 @@ import {
   formatTime,
   fromDateInput,
   fromDateTimeInput,
+  nowIso,
   relativeDay,
   toDateInput,
   toDateTimeInput,
@@ -65,6 +66,10 @@ const {
   visibleGoals,
   visibleTasks,
   taskGoalIds,
+  goalMilestoneIds,
+  goalDirectionIds,
+  milestones,
+  directions,
   predecessorIds,
   taskNameById,
   goalTaskStats,
@@ -79,6 +84,7 @@ const {
   tasksForGoalTree,
   refresh,
   saveGoal,
+  saveGoalRelations,
   saveTask,
   setTaskStatus,
   setGoalParent,
@@ -713,6 +719,8 @@ interface GoalFormState {
   manualProgress: number
   reviewFrequency: string
   competencyId: string
+  milestoneIds: string[]
+  directionIds: string[]
 }
 
 function emptyGoalForm(): GoalFormState {
@@ -730,6 +738,8 @@ function emptyGoalForm(): GoalFormState {
     manualProgress: 0,
     reviewFrequency: '每周',
     competencyId: '',
+    milestoneIds: [],
+    directionIds: [],
   }
 }
 
@@ -936,22 +946,19 @@ function openGoalEdit(goal: Goal): void {
     priority: goal.priority,
     successCriteria: goal.successCriteria,
     status: goal.status,
-    progressMode:
-      goal.progressMode === ProgressMode.MILESTONE_BASED
-        ? ProgressMode.TASK_BASED
-        : goal.progressMode,
+    progressMode: goal.progressMode,
     manualProgress: goal.manualProgress,
     reviewFrequency: goal.reviewFrequency,
     competencyId: goal.competencyId ?? '',
+    milestoneIds: [...(goalMilestoneIds.value[goal.id] ?? [])],
+    directionIds: [...(goalDirectionIds.value[goal.id] ?? [])],
   })
   formError.value = ''
   modalKind.value = 'goal'
 }
 
 function effectiveProgressMode(goal: Goal): ProgressMode {
-  return goal.progressMode === ProgressMode.MILESTONE_BASED
-    ? ProgressMode.TASK_BASED
-    : goal.progressMode
+  return goal.progressMode
 }
 
 async function submitGoal(): Promise<void> {
@@ -973,14 +980,12 @@ async function submitGoal(): Promise<void> {
       priority: goalForm.priority,
       successCriteria: goalForm.successCriteria.trim(),
       status: goalForm.status,
-      progressMode:
-        goalForm.progressMode === ProgressMode.MILESTONE_BASED
-          ? ProgressMode.TASK_BASED
-          : goalForm.progressMode,
+      progressMode: goalForm.progressMode,
       manualProgress: Math.max(0, Math.min(100, Number(goalForm.manualProgress) || 0)),
       reviewFrequency: goalForm.reviewFrequency.trim(),
     }
-    await saveGoal(payload, goalEditingId.value ?? undefined)
+    const entity = await saveGoal(payload, goalEditingId.value ?? undefined)
+    await saveGoalRelations(entity.id, [...goalForm.milestoneIds], [...goalForm.directionIds])
     const created = !goalEditingId.value
     resetModal()
     success(created ? '目标已创建' : '目标已更新')
@@ -1072,13 +1077,21 @@ async function submitTask(): Promise<void> {
       status: taskForm.status,
       completionCriteria: taskForm.completionCriteria.trim(),
       learningTemplateId: existing?.learningTemplateId ?? null,
+      completedAt:
+        taskForm.status === TaskStatus.COMPLETED
+          ? existing?.completedAt ?? nowIso()
+          : null,
     }
-    await saveTask(
+    const previousStatus = existing?.status
+    const entity = await saveTask(
       payload,
       [...taskForm.goalIds],
       [...taskForm.competencyIds],
       taskEditingId.value ?? undefined,
     )
+    if (previousStatus !== undefined && previousStatus !== taskForm.status) {
+      await setTaskStatus(entity.id, taskForm.status)
+    }
     const created = !taskEditingId.value
     resetModal()
     success(created ? '任务已创建' : '任务已更新')
@@ -2362,6 +2375,49 @@ onMounted(async () => {
           </span>
         </div>
 
+        <div class="field">
+          <span class="field-label">阶段里程碑</span>
+          <div class="relation-options">
+            <label
+              v-for="milestone in milestones.filter((row) => !row.archivedAt)"
+              :key="milestone.id"
+              class="relation-option"
+              :class="{ selected: goalForm.milestoneIds.includes(milestone.id) }"
+            >
+              <input
+                type="checkbox"
+                :checked="goalForm.milestoneIds.includes(milestone.id)"
+                @change="toggleGoalRelation(goalForm.milestoneIds, milestone.id, $event)"
+              />
+              <span>{{ milestone.name }}</span>
+              <small>{{ formatShortDate(milestone.dueDate, '待定') }}</small>
+            </label>
+            <p v-if="milestones.filter((row) => !row.archivedAt).length === 0" class="field-hint">
+              还没有里程碑，先到发展路线里为目标方向添加阶段成果。
+            </p>
+          </div>
+        </div>
+
+        <div class="field">
+          <span class="field-label">支撑的发展方向</span>
+          <div class="relation-options">
+            <label
+              v-for="direction in directions.filter((row) => !row.archivedAt)"
+              :key="direction.id"
+              class="relation-option"
+              :class="{ selected: goalForm.directionIds.includes(direction.id) }"
+            >
+              <input
+                type="checkbox"
+                :checked="goalForm.directionIds.includes(direction.id)"
+                @change="toggleGoalRelation(goalForm.directionIds, direction.id, $event)"
+              />
+              <span class="relation-dot" :style="{ background: direction.color }" />
+              <span>{{ direction.name }}</span>
+            </label>
+          </div>
+        </div>
+
         <p v-if="formError" class="form-error">{{ formError }}</p>
         <div class="modal-actions">
           <button type="button" class="btn btn-secondary" @click="resetModal">取消</button>
@@ -2951,6 +3007,42 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.relation-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.relation-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 99px;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.relation-option.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--ink);
+}
+
+.relation-option small {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.relation-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
 .header-actions {
   display: flex;
   align-items: center;

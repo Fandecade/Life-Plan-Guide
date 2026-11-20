@@ -7,6 +7,7 @@ import type {
   ProgressMode,
   TaskStatus,
   TaskType,
+  TimeboxKind,
   TimeboxStatus,
   Urgency,
 } from './enums'
@@ -43,6 +44,7 @@ export interface Task extends BaseEntity {
   status: TaskStatus
   completionCriteria: string
   learningTemplateId: string | null
+  completedAt: string | null
 }
 
 export interface Timebox extends BaseEntity {
@@ -55,4 +57,6 @@ export interface Timebox extends BaseEntity {
   actualDuration: number
   status: TimeboxStatus
   note: string
+  kind?: TimeboxKind
+  reviewScheduleId?: string | null
 }

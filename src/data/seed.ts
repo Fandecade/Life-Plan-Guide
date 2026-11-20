@@ -392,6 +392,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
     importance: Importance.CRITICAL,
     urgency: Urgency.HIGH,
     status: TaskStatus.TODO,
+    completedAt: null,
     completionCriteria: '完成预习、精读，并产出一段白纸输出。',
     learningTemplateId: workflow.id,
   })
@@ -410,6 +411,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
     importance: Importance.IMPORTANT,
     urgency: Urgency.MEDIUM,
     status: TaskStatus.TODO,
+    completedAt: null,
     completionCriteria: '输出包含变量选择、翻转规则和终止条件。',
     learningTemplateId: null,
   })
@@ -428,6 +430,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
     importance: Importance.IMPORTANT,
     urgency: Urgency.MEDIUM,
     status: TaskStatus.TODO,
+    completedAt: null,
     completionCriteria: '函数通过测试，能在一个小规模 SAT 实例上运行。',
     learningTemplateId: null,
   })
@@ -446,6 +449,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
     importance: Importance.IMPORTANT,
     urgency: Urgency.LOW,
     status: TaskStatus.TODO,
+    completedAt: null,
     completionCriteria: '画出驱动注册与读写调用的流程草图。',
     learningTemplateId: null,
   })
@@ -464,6 +468,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
     importance: Importance.NORMAL,
     urgency: Urgency.MEDIUM,
     status: TaskStatus.TODO,
+    completedAt: null,
     completionCriteria: '能不看资料写出更新公式并解释参数。',
     learningTemplateId: null,
   })
@@ -691,6 +696,8 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
     actualDuration: 0,
     status: 'PLANNED',
     note: '复习提醒',
+    kind: 'REVIEW',
+    reviewScheduleId: null,
   })
 
   await repos.reviewSchedules.create({
@@ -716,6 +723,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
     fileUrl: '',
     externalUrl: 'https://github.com/example/aco-sat-reproduction',
     qualityNote: '结构清晰，但实验部分还不完整。',
+    taskId: null,
   })
 
   const evidenceReport = await repos.evidences.create({
@@ -725,6 +733,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
     fileUrl: '',
     externalUrl: 'obsidian://open?vault=study&file=WalkSAT',
     qualityNote: '能独立复述，但噪声参数部分仍需补强。',
+    taskId: null,
   })
 
   await repos.competencyEvidences.create({

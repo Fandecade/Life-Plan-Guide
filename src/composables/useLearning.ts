@@ -14,8 +14,9 @@ import {
   type Task,
   type Workflow,
 } from '@/domain'
-import { repos } from '@/data'
+import { changeTaskStatus, emitDataChange, repos } from '@/data'
 import { addDays, endOfDay, nowIso, startOfDay } from '@/utils/date'
+import { useDataRefresh } from './useDataRefresh'
 
 export type WorkflowInput = Omit<NewEntity<Workflow>, 'id'>
 export type LearningRecordInput = Omit<NewEntity<LearningRecord>, 'id'>
@@ -36,6 +37,13 @@ export interface FinishSessionInput {
   status: 'COMPLETED' | 'INTERRUPTED'
   actualAssessment: number | null
   reflection: string
+  taskStatusAfter?: TaskStatus | null
+}
+
+export interface CompleteReviewInput {
+  recallResult?: number
+  difficulty?: number | null
+  markTaskComplete?: boolean
 }
 
 export function nextReviewInterval(recall: number): number {
@@ -54,6 +62,12 @@ function reviewTimeAt(iso: string): string {
 function addMinutes(iso: string, minutes: number): string {
   return new Date(new Date(iso).getTime() + minutes * 60000).toISOString()
 }
+
+export interface TaskLearningStats {
+  completedSessions: number
+  pendingReviews: number
+}
+
 
 export function useLearning() {
   const loading = ref(true)
@@ -111,6 +125,10 @@ export function useLearning() {
         }
         return (rank[left.status] ?? 5) - (rank[right.status] ?? 5)
       }),
+  )
+
+  const learningTasks = computed(() =>
+    availableTasks.value.filter((task) => task.status !== TaskStatus.COMPLETED),
   )
 
   const activeSession = computed(() => {
@@ -199,7 +217,8 @@ export function useLearning() {
     return reviewSchedules.value
       .filter(
         (row) =>
-          row.taskId &&
+          !row.archivedAt &&
+          (row.taskId || row.knowledgeItemId) &&
           (row.status === ReviewScheduleStatus.PENDING ||
             row.status === ReviewScheduleStatus.DUE) &&
           row.scheduledAt <= deadline,
@@ -212,7 +231,8 @@ export function useLearning() {
     return reviewSchedules.value
       .filter(
         (row) =>
-          row.taskId &&
+          !row.archivedAt &&
+          (row.taskId || row.knowledgeItemId) &&
           (row.status === ReviewScheduleStatus.PENDING ||
             row.status === ReviewScheduleStatus.DUE) &&
           row.scheduledAt > deadline,
@@ -222,7 +242,12 @@ export function useLearning() {
 
   const completedReviews = computed(() =>
     reviewSchedules.value
-      .filter((row) => row.taskId && row.status === ReviewScheduleStatus.COMPLETED)
+      .filter(
+        (row) =>
+          !row.archivedAt &&
+          (row.taskId || row.knowledgeItemId) &&
+          row.status === ReviewScheduleStatus.COMPLETED,
+      )
       .sort((left, right) => (right.completedAt ?? '').localeCompare(left.completedAt ?? '')),
   )
 
@@ -236,6 +261,7 @@ export function useLearning() {
       .filter((session) => {
         const start = new Date(session.startedAt).getTime()
         return (
+          !session.archivedAt &&
           session.status === SessionStatus.COMPLETED &&
           start >= weekStart &&
           start < weekStart + 7 * 86400000
@@ -251,8 +277,76 @@ export function useLearning() {
     }
   })
 
-  async function refresh(): Promise<void> {
-    loading.value = true
+  const taskLearningStats = computed<Record<string, TaskLearningStats>>(() => {
+    const map: Record<string, TaskLearningStats> = {}
+    const ensure = (taskId: string): TaskLearningStats => {
+      if (!map[taskId]) map[taskId] = { completedSessions: 0, pendingReviews: 0 }
+      return map[taskId]
+    }
+    for (const session of sessions.value) {
+      if (session.archivedAt || !session.taskId) continue
+      if (session.status !== SessionStatus.COMPLETED) continue
+      ensure(session.taskId).completedSessions += 1
+    }
+    for (const row of reviewSchedules.value) {
+      if (row.archivedAt || !row.taskId) continue
+      if (
+        row.status !== ReviewScheduleStatus.PENDING &&
+        row.status !== ReviewScheduleStatus.DUE
+      ) {
+        continue
+      }
+      ensure(row.taskId).pendingReviews += 1
+    }
+    return map
+  })
+
+  async function createReviewPlan(input: {
+    knowledgeItemId?: string | null
+    taskId?: string | null
+    sessionId?: string | null
+    scheduledAt: string
+  }): Promise<ReviewSchedule> {
+    const schedule = await repos.reviewSchedules.create({
+      knowledgeItemId: input.knowledgeItemId ?? null,
+      taskId: input.taskId ?? null,
+      sessionId: input.sessionId ?? null,
+      timeboxId: null,
+      previousTaskStatus: null,
+      nextScheduleId: null,
+      scheduledAt: input.scheduledAt,
+      completedAt: null,
+      recallResult: null,
+      difficulty: null,
+      nextReviewAt: null,
+      externalTool: '',
+      externalUrl: '',
+      status: ReviewScheduleStatus.PENDING,
+    })
+    if (!input.taskId) return schedule
+
+    const timebox = await repos.timeboxes.create({
+      taskId: input.taskId,
+      plannedStart: input.scheduledAt,
+      plannedEnd: addMinutes(input.scheduledAt, 30),
+      plannedDuration: 30,
+      actualStart: null,
+      actualEnd: null,
+      actualDuration: 0,
+      status: TimeboxStatus.PLANNED,
+      note: '复习提醒',
+      kind: 'REVIEW',
+      reviewScheduleId: schedule.id,
+    })
+    const updated = await repos.reviewSchedules.update(schedule.id, {
+      timeboxId: timebox.id,
+    })
+    emitDataChange('timebox')
+    return updated
+  }
+
+  async function reload(silent = false): Promise<void> {
+    if (!silent) loading.value = true
     error.value = null
     try {
       const [workflowRows, sessionRows, recordRows, knowledgeRows, reviewRows, resourceRows, taskRows, links] =
@@ -286,15 +380,24 @@ export function useLearning() {
       ? await repos.workflows.update(id, input)
       : await repos.workflows.create(input)
     await refresh()
+    emitDataChange('workflow')
     return entity
   }
 
   async function setWorkflowArchived(id: string, archived: boolean): Promise<void> {
     archived ? await repos.workflows.archive(id) : await repos.workflows.restore(id)
     await refresh()
+    emitDataChange('workflow')
   }
 
   async function startSession(input: StartSessionInput): Promise<LearningSession> {
+    if (activeSession.value) {
+      throw new Error('已有进行中的学习会话，请先完成或中断当前会话')
+    }
+    const task = tasks.value.find((row) => row.id === input.taskId)
+    if (task?.status === TaskStatus.COMPLETED) {
+      throw new Error('已完成的任务不需要再开始学习会话，可以直接安排复习')
+    }
     const workflow = workflowById.value[input.workflowId]
     const firstStage = workflow?.stages[0]?.key ?? null
     const entity = await repos.learningSessions.create({
@@ -391,35 +494,30 @@ export function useLearning() {
       if (!existing) {
         const interval = nextReviewInterval(input.actualAssessment ?? 2)
         const scheduledAt = reviewTimeAt(addDays(endedAt, interval))
-        const timebox = await repos.timeboxes.create({
-          taskId: session.taskId,
-          plannedStart: scheduledAt,
-          plannedEnd: addMinutes(scheduledAt, 30),
-          plannedDuration: 30,
-          actualStart: null,
-          actualEnd: null,
-          actualDuration: 0,
-          status: TimeboxStatus.PLANNED,
-          note: '复习提醒',
-        })
-        await repos.reviewSchedules.create({
-          knowledgeItemId: null,
+        await createReviewPlan({
           taskId: session.taskId,
           sessionId,
-          timeboxId: timebox.id,
-          previousTaskStatus: null,
           scheduledAt,
-          completedAt: null,
-          recallResult: null,
-          difficulty: null,
-          nextReviewAt: null,
-          externalTool: '',
-          externalUrl: '',
-          status: ReviewScheduleStatus.PENDING,
         })
       }
     }
+
+    if (input.status === SessionStatus.COMPLETED && session.taskId) {
+      const task = tasks.value.find((row) => row.id === session.taskId)
+      if (task) {
+        const requested = input.taskStatusAfter ?? null
+        if (requested && requested !== task.status) {
+          await changeTaskStatus(task.id, requested)
+        } else if (
+          !requested &&
+          (task.status === TaskStatus.TODO || task.status === TaskStatus.BACKLOG)
+        ) {
+          await changeTaskStatus(task.id, TaskStatus.IN_PROGRESS)
+        }
+      }
+    }
     await refresh()
+    emitDataChange('learning', 'review', 'task')
     return entity
   }
 
@@ -428,12 +526,14 @@ export function useLearning() {
       ? await repos.learningRecords.update(id, input)
       : await repos.learningRecords.create(input)
     await refresh()
+    emitDataChange('learning')
     return entity
   }
 
   async function archiveRecord(id: string): Promise<void> {
     await repos.learningRecords.archive(id)
     await refresh()
+    emitDataChange('learning')
   }
 
   async function syncSessionKnowledge(sessionId: string, knowledgeIds: string[]): Promise<void> {
@@ -451,6 +551,7 @@ export function useLearning() {
       }
     }
     await refresh()
+    emitDataChange('knowledge')
   }
 
   async function saveKnowledge(input: KnowledgeInput, id?: string): Promise<KnowledgeItem> {
@@ -458,12 +559,14 @@ export function useLearning() {
       ? await repos.knowledgeItems.update(id, input)
       : await repos.knowledgeItems.create(input)
     await refresh()
+    emitDataChange('knowledge')
     return entity
   }
 
   async function setKnowledgeArchived(id: string, archived: boolean): Promise<void> {
     archived ? await repos.knowledgeItems.archive(id) : await repos.knowledgeItems.restore(id)
     await refresh()
+    emitDataChange('knowledge')
   }
 
   async function saveReviewSchedule(
@@ -474,58 +577,64 @@ export function useLearning() {
       ? await repos.reviewSchedules.update(id, input)
       : await repos.reviewSchedules.create(input)
     await refresh()
+    emitDataChange('review')
     return entity
   }
 
-  async function completeReview(schedule: ReviewSchedule): Promise<void> {
+  async function completeReview(
+    schedule: ReviewSchedule,
+    input: CompleteReviewInput = {},
+  ): Promise<void> {
     const completedAt = nowIso()
-    let previousTaskStatus: string | null = null
-    if (schedule.taskId) {
-      const task = tasks.value.find((row) => row.id === schedule.taskId)
-      if (task) {
-        previousTaskStatus = task.status
-        await repos.tasks.update(task.id, {
-          status: TaskStatus.COMPLETED,
+    const recall = input.recallResult ?? schedule.recallResult ?? 3
+    const interval = nextReviewInterval(recall)
+    const nextReviewAt = reviewTimeAt(addDays(completedAt, interval))
 
+    let previousTaskStatus: string | null = schedule.previousTaskStatus ?? null
+    const task = schedule.taskId
+      ? tasks.value.find((row) => row.id === schedule.taskId)
+      : undefined
+    if (input.markTaskComplete && task && task.status !== TaskStatus.COMPLETED) {
+      previousTaskStatus = task.status
+      await changeTaskStatus(task.id, TaskStatus.COMPLETED)
+    }
+
+    const nextSchedule = await createReviewPlan({
+      knowledgeItemId: schedule.knowledgeItemId,
+      taskId: schedule.taskId ?? null,
+      sessionId: schedule.sessionId ?? null,
+      scheduledAt: nextReviewAt,
+    })
+
+    if (schedule.timeboxId) {
+      const timebox = await repos.timeboxes.get(schedule.timeboxId)
+      if (timebox && timebox.status !== TimeboxStatus.COMPLETED) {
+        await repos.timeboxes.update(timebox.id, {
+          status: TimeboxStatus.COMPLETED,
+          actualStart: timebox.plannedStart,
+          actualEnd: timebox.plannedEnd,
+          actualDuration: timebox.plannedDuration,
         })
       }
     }
+
     await repos.reviewSchedules.update(schedule.id, {
       completedAt,
       status: ReviewScheduleStatus.COMPLETED,
+      recallResult: recall,
+      difficulty: input.difficulty ?? schedule.difficulty ?? null,
+      nextReviewAt,
       previousTaskStatus,
+      nextScheduleId: nextSchedule.id,
     })
     await refresh()
+    emitDataChange('review', 'task', 'timebox')
   }
 
   async function saveTaskReview(taskId: string, scheduledAt: string): Promise<void> {
-    const timebox = await repos.timeboxes.create({
-      taskId,
-      plannedStart: scheduledAt,
-      plannedEnd: addMinutes(scheduledAt, 30),
-      plannedDuration: 30,
-      actualStart: null,
-      actualEnd: null,
-      actualDuration: 0,
-      status: TimeboxStatus.PLANNED,
-      note: '复习提醒',
-    })
-    await repos.reviewSchedules.create({
-      knowledgeItemId: null,
-      taskId,
-      sessionId: null,
-      timeboxId: timebox.id,
-      previousTaskStatus: null,
-      scheduledAt,
-      completedAt: null,
-      recallResult: null,
-      difficulty: null,
-      nextReviewAt: null,
-      externalTool: '',
-      externalUrl: '',
-      status: ReviewScheduleStatus.PENDING,
-    })
+    await createReviewPlan({ taskId, scheduledAt })
     await refresh()
+    emitDataChange('review', 'timebox')
   }
 
   async function skipReview(scheduleId: string): Promise<void> {
@@ -537,25 +646,46 @@ export function useLearning() {
       await repos.timeboxes.archive(schedule.timeboxId)
     }
     await refresh()
+    emitDataChange('review')
   }
 
   async function revertReview(schedule: ReviewSchedule): Promise<void> {
-    if (schedule.taskId) {
+    if (schedule.nextScheduleId) {
+      const next = await repos.reviewSchedules.get(schedule.nextScheduleId)
+      if (next && next.status === ReviewScheduleStatus.PENDING) {
+        if (next.timeboxId) {
+          await repos.timeboxes.remove(next.timeboxId)
+        }
+        await repos.reviewSchedules.remove(next.id)
+      }
+    }
+    if (schedule.timeboxId) {
+      const timebox = await repos.timeboxes.get(schedule.timeboxId)
+      if (timebox && !timebox.archivedAt) {
+        await repos.timeboxes.update(timebox.id, {
+          status: TimeboxStatus.PLANNED,
+          actualStart: null,
+          actualEnd: null,
+          actualDuration: 0,
+        })
+      }
+    }
+    if (schedule.taskId && schedule.previousTaskStatus) {
       const task = tasks.value.find((row) => row.id === schedule.taskId)
-      if (task) {
-        const restored =
-          schedule.previousTaskStatus && schedule.previousTaskStatus !== TaskStatus.COMPLETED
-            ? (schedule.previousTaskStatus as TaskStatus)
-            : TaskStatus.IN_PROGRESS
-        await repos.tasks.update(task.id, { status: restored })
+      if (task && schedule.previousTaskStatus !== TaskStatus.COMPLETED) {
+        await changeTaskStatus(task.id, schedule.previousTaskStatus as TaskStatus)
       }
     }
     await repos.reviewSchedules.update(schedule.id, {
       status: ReviewScheduleStatus.PENDING,
       completedAt: null,
+      recallResult: null,
+      nextReviewAt: null,
       previousTaskStatus: null,
+      nextScheduleId: null,
     })
     await refresh()
+    emitDataChange('review', 'task', 'timebox')
   }
 
   async function saveResource(input: ResourceInput, id?: string): Promise<Resource> {
@@ -563,13 +693,26 @@ export function useLearning() {
       ? await repos.resources.update(id, input)
       : await repos.resources.create(input)
     await refresh()
+    emitDataChange('learning')
     return entity
   }
 
   async function setResourceArchived(id: string, archived: boolean): Promise<void> {
     archived ? await repos.resources.archive(id) : await repos.resources.restore(id)
     await refresh()
+    emitDataChange('learning')
   }
+
+  async function refresh(): Promise<void> {
+    await reload()
+  }
+
+  useDataRefresh(
+    ['task', 'review', 'learning', 'knowledge', 'workflow', 'evidence', 'competency'],
+    () => {
+      void reload(true)
+    },
+  )
 
   return {
     loading,
@@ -586,6 +729,7 @@ export function useLearning() {
     activeKnowledge,
     activeResources,
     availableTasks,
+    learningTasks,
     activeSession,
     activeWorkflow,
     activeStage,
@@ -598,6 +742,7 @@ export function useLearning() {
     knowledgeById,
     recordsBySession,
     knowledgeIdsBySession,
+    taskLearningStats,
     dueReviews,
     upcomingReviews,
     completedReviews,

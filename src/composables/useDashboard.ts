@@ -3,19 +3,24 @@ import {
   GoalStatus,
   HabitStatus,
   Priority,
-  ProgressMode,
+
   ReviewScheduleStatus,
   ReviewType,
   TaskStatus,
   TaskType,
   TimeboxStatus,
+  computeGoalProgress,
   taskStatusLabels,
   timeboxStatusLabels,
   type Goal,
+  type GoalMilestone,
+  type Milestone,
+
   type UserSettings,
 } from '@/domain'
-import { repos } from '@/data'
+import { changeTaskStatus, emitDataChange, repos } from '@/data'
 import { endOfDay, isSameDay, nowIso, startOfDay, todayKey } from '@/utils/date'
+import { useDataRefresh } from './useDataRefresh'
 
 const priorityRank: Record<string, number> = {
   URGENT: 4,
@@ -50,6 +55,7 @@ export interface TodayScheduleItem {
   taskType: TaskType | null
   taskStatus: TaskStatus | null
   isCompleted: boolean
+  isReview: boolean
 }
 
 function rangeStart(range: GrowthRange): Date {
@@ -95,6 +101,8 @@ export function useDashboard() {
   const goals = ref<Awaited<ReturnType<typeof repos.goals.list>>>([])
   const knowledgeItems = ref<Awaited<ReturnType<typeof repos.knowledgeItems.list>>>([])
   const taskGoals = ref<Awaited<ReturnType<typeof repos.taskGoals.list>>>([])
+  const milestones = ref<Milestone[]>([])
+  const goalMilestones = ref<GoalMilestone[]>([])
   const reviews = ref<Awaited<ReturnType<typeof repos.reviews.list>>>([])
   const settings = ref<UserSettings[]>([])
   const visionCount = ref(0)
@@ -167,6 +175,8 @@ export function useDashboard() {
     const entries: TodayScheduleItem[] = todayTimeboxes.map((timebox) => {
       const task = taskMap.get(timebox.taskId)
       const taskStatus = task?.status ?? null
+      const isReview = timebox.kind === 'REVIEW'
+      const reviewDone = timebox.status === TimeboxStatus.COMPLETED
       return {
         id: `timebox-${timebox.id}`,
         kind: 'timebox',
@@ -176,13 +186,17 @@ export function useDashboard() {
         description: task?.description ?? '',
         start: timebox.plannedStart,
         duration: timebox.plannedDuration,
-        statusLabel:
-          taskStatus && CLOSED_TASK_STATUSES.has(taskStatus)
+        statusLabel: isReview
+          ? reviewDone
+            ? '复习完成'
+            : '复习'
+          : taskStatus && CLOSED_TASK_STATUSES.has(taskStatus)
             ? taskStatusLabels[taskStatus]
             : timeboxStatusLabels[timebox.status],
         taskType: task?.taskType ?? null,
         taskStatus,
-        isCompleted: taskStatus === TaskStatus.COMPLETED,
+        isCompleted: isReview ? reviewDone : taskStatus === TaskStatus.COMPLETED,
+        isReview,
       }
     })
 
@@ -201,6 +215,7 @@ export function useDashboard() {
         taskType: task.taskType,
         taskStatus: task.status,
         isCompleted: task.status === TaskStatus.COMPLETED,
+        isReview: false,
       })
     }
 
@@ -282,46 +297,15 @@ export function useDashboard() {
     return list[0] ?? null
   })
 
-  function goalSubtreeIds(goalId: string): string[] {
-    const ids: string[] = []
-    const queue = [goalId]
-    const visited = new Set<string>()
-    while (queue.length > 0) {
-      const currentId = queue.shift()
-      if (!currentId || visited.has(currentId)) continue
-      const goal = goals.value.find((item) => item.id === currentId)
-      if (!goal || (currentId !== goalId && goal.archivedAt)) continue
-      visited.add(currentId)
-      ids.push(currentId)
-      for (const child of goals.value) {
-        if (child.parentGoalId === currentId) queue.push(child.id)
-      }
-    }
-    return ids
-  }
-
   function progressForGoal(goal: Goal): number {
-    if (goal.progressMode === ProgressMode.MANUAL) {
-      return Math.max(0, Math.min(100, Math.round(goal.manualProgress)))
-    }
-    const goalIds = new Set(goalSubtreeIds(goal.id))
-    const links = taskGoals.value.filter(
-      (row) => goalIds.has(row.goalId) && !row.archivedAt,
-    )
-    const taskMap = new Map(tasks.value.map((task) => [task.id, task]))
-    let total = 0
-    let done = 0
-    const seenTaskIds = new Set<string>()
-    for (const row of links) {
-      if (seenTaskIds.has(row.taskId)) continue
-      seenTaskIds.add(row.taskId)
-      const task = taskMap.get(row.taskId)
-      if (!task || task.archivedAt || task.status === TaskStatus.CANCELLED) continue
-      const weight = task.estimatedDuration > 0 ? task.estimatedDuration : 30
-      total += weight
-      if (task.status === TaskStatus.COMPLETED) done += weight
-    }
-    return total === 0 ? 0 : Math.round((done / total) * 100)
+    return computeGoalProgress({
+      goal,
+      goals: goals.value,
+      tasks: tasks.value,
+      taskGoals: taskGoals.value,
+      milestones: milestones.value,
+      goalMilestones: goalMilestones.value,
+    })
   }
 
   const goalProgressList = computed(() =>
@@ -337,7 +321,7 @@ export function useDashboard() {
     const end = rangeEnd(summaryRange.value).getTime()
 
     const completedTasks = tasks.value.filter((task) => {
-      const time = new Date(task.updatedAt).getTime()
+      const time = new Date(task.completedAt ?? task.updatedAt).getTime()
       return task.status === TaskStatus.COMPLETED && time >= start && time < end
     }).length
 
@@ -485,7 +469,7 @@ export function useDashboard() {
     if (!task) throw new Error('任务不存在')
     const nextStatus =
       task.status === TaskStatus.COMPLETED ? TaskStatus.TODO : TaskStatus.COMPLETED
-    await repos.tasks.update(taskId, { status: nextStatus })
+    await changeTaskStatus(taskId, nextStatus)
     await refresh()
   }
 
@@ -537,10 +521,11 @@ export function useDashboard() {
       })
     }
     await refresh()
+    emitDataChange('timebox', 'task')
   }
 
-  async function refresh(): Promise<void> {
-    loading.value = true
+  async function reload(silent = false): Promise<void> {
+    if (!silent) loading.value = true
     error.value = null
     try {
       const [
@@ -554,6 +539,8 @@ export function useDashboard() {
         goalRows,
         knowledgeRows,
         taskGoalRows,
+        milestoneRows,
+        goalMilestoneRows,
         reviewEntryRows,
         settingRows,
         visionTotal,
@@ -568,6 +555,8 @@ export function useDashboard() {
         repos.goals.list(),
         repos.knowledgeItems.list(),
         repos.taskGoals.list(),
+        repos.milestones.list(),
+        repos.goalMilestones.list(),
         repos.reviews.list(),
         repos.userSettings.list(),
         repos.visions.count(),
@@ -583,6 +572,8 @@ export function useDashboard() {
       goals.value = goalRows
       knowledgeItems.value = knowledgeRows
       taskGoals.value = taskGoalRows
+      milestones.value = milestoneRows
+      goalMilestones.value = goalMilestoneRows
       reviews.value = reviewEntryRows
       settings.value = settingRows
       visionCount.value = visionTotal
@@ -594,6 +585,17 @@ export function useDashboard() {
       loading.value = false
     }
   }
+
+  async function refresh(): Promise<void> {
+    await reload()
+  }
+
+  useDataRefresh(
+    ['task', 'goal', 'timebox', 'milestone', 'review', 'habit', 'learning', 'evidence', 'competency'],
+    () => {
+      void reload(true)
+    },
+  )
 
   return {
     loading,

@@ -1,6 +1,8 @@
 import { computed, ref } from 'vue'
 import {
+  CompetencyStatus,
   DirectionStatus,
+  EvidenceType,
   MilestoneStatus,
   Priority,
   type Competency,
@@ -13,12 +15,21 @@ import {
   type Milestone,
   type NewEntity,
 } from '@/domain'
-import { repos } from '@/data'
-import { addDays } from '@/utils/date'
+import { emitDataChange, repos, setCompetencyArchivedCascade } from '@/data'
+import { useDataRefresh } from './useDataRefresh'
+import { addDays, nowIso } from '@/utils/date'
 
 export type CompetencyInput = Omit<NewEntity<Competency>, 'id'>
 export type MilestoneInput = Omit<NewEntity<Milestone>, 'id'>
 export type RoadmapKind = 'competency' | 'milestone'
+
+export interface CompetencyEvidenceDraft {
+  competencyId: string
+  title: string
+  description: string
+  assessedLevel: CompetencyLevel
+  note: string
+}
 
 export interface DirectionAssignmentInput {
   directionId: string
@@ -253,9 +264,9 @@ export function useRoadmap() {
     )
   }
 
-  async function refresh(): Promise<void> {
+  async function reload(silent = false): Promise<void> {
     const isInitialLoad = competencies.value.length === 0 && directions.value.length === 0
-    if (isInitialLoad) loading.value = true
+    if (isInitialLoad && !silent) loading.value = true
     error.value = null
     try {
       const [
@@ -336,6 +347,7 @@ export function useRoadmap() {
     }
 
     await refresh()
+    emitDataChange('competency', 'direction')
     return entity
   }
 
@@ -354,6 +366,7 @@ export function useRoadmap() {
       ? await repos.milestones.update(id, input)
       : await repos.milestones.create(input)
     await refresh()
+    emitDataChange('milestone', 'goal')
     return entity
   }
 
@@ -365,6 +378,7 @@ export function useRoadmap() {
       dueDate: milestone.dueDate ? addDays(milestone.dueDate, deltaDays) : null,
     })
     await refresh()
+    emitDataChange('milestone')
     return entity
   }
 
@@ -374,16 +388,61 @@ export function useRoadmap() {
     archived: boolean,
   ): Promise<void> {
     if (kind === 'competency') {
-      archived
-        ? await repos.competencies.archive(id)
-        : await repos.competencies.restore(id)
+      await setCompetencyArchivedCascade(id, archived)
     } else {
       archived
         ? await repos.milestones.archive(id)
         : await repos.milestones.restore(id)
+      emitDataChange('milestone')
     }
     await refresh()
   }
+
+  async function refresh(): Promise<void> {
+    await reload()
+  }
+
+  async function recordCompetencyEvidence(
+    draft: CompetencyEvidenceDraft,
+  ): Promise<void> {
+    const competency = competencies.value.find((row) => row.id === draft.competencyId)
+    if (!competency) throw new Error('能力不存在')
+    const evidence = await repos.evidences.create({
+      title: draft.title.trim() || `成果：${competency.name}`,
+      description: draft.description.trim(),
+      evidenceType: EvidenceType.NOTE,
+      fileUrl: '',
+      externalUrl: '',
+      qualityNote: draft.note.trim(),
+      taskId: null,
+    })
+    await repos.competencyEvidences.create({
+      competencyId: competency.id,
+      evidenceId: evidence.id,
+      assessedLevel: draft.assessedLevel,
+      assessmentNote: draft.note.trim(),
+      assessedAt: nowIso(),
+    })
+    const assessed = levelIndex(draft.assessedLevel)
+    if (assessed > levelIndex(competency.currentLevel)) {
+      await repos.competencies.update(competency.id, {
+        currentLevel: draft.assessedLevel,
+        status:
+          assessed >= levelIndex(competency.targetLevel)
+            ? CompetencyStatus.VALIDATED
+            : CompetencyStatus.PENDING_VALIDATION,
+      })
+    }
+    await refresh()
+    emitDataChange('competency', 'evidence')
+  }
+
+  useDataRefresh(
+    ['task', 'goal', 'competency', 'direction', 'milestone', 'evidence'],
+    () => {
+      void reload(true)
+    },
+  )
 
   return {
     loading,
@@ -418,6 +477,7 @@ export function useRoadmap() {
     saveCompetency,
     saveMilestone,
     moveMilestone,
+    recordCompetencyEvidence,
     setArchived,
     levelPercent,
   }

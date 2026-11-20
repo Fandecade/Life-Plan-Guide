@@ -20,16 +20,21 @@ import {
   CompetencyLevel,
   CompetencyStatus,
   GoalStatus,
+  Importance,
+  MilestoneStatus,
   Priority,
   competencyCategoryLabels,
   competencyLevelLabels,
   competencyStatusLabels,
+  importanceLabels,
+  milestoneStatusLabels,
   priorityLabels,
   type Competency,
   type Direction,
   type Goal,
+  type Milestone,
 } from '@/domain'
-import { formatShortDate } from '@/utils/date'
+import { formatShortDate, fromDateInput, toDateInput } from '@/utils/date'
 
 const { success, error: toastError } = useToast()
 const route = useRoute()
@@ -51,8 +56,13 @@ const {
   includeArchived,
   coveredDirectionCount,
   growthHistoryFor,
+  milestones,
+  inProgressMilestones,
+  milestonesOfDirection,
   refresh,
   saveCompetency,
+  saveMilestone,
+  recordCompetencyEvidence,
   setArchived,
   descendantsOf,
 } = useRoadmap()
@@ -194,6 +204,123 @@ function archiveCompetencyFromDetail(): void {
   const competency = detailCompetency.value
   closeCompetencyDetail()
   if (competency) askToggle(competency)
+}
+
+const evidenceModalOpen = ref(false)
+const evidenceSaving = ref(false)
+const evidenceError = ref('')
+const evidenceForm = reactive({
+  competencyId: '',
+  title: '',
+  description: '',
+  assessedLevel: CompetencyLevel.L2 as CompetencyLevel,
+  note: '',
+})
+
+function openEvidence(competency: Competency): void {
+  evidenceForm.competencyId = competency.id
+  evidenceForm.title = ''
+  evidenceForm.description = ''
+  evidenceForm.assessedLevel = competency.currentLevel
+  evidenceForm.note = ''
+  evidenceError.value = ''
+  evidenceModalOpen.value = true
+}
+
+async function submitEvidence(): Promise<void> {
+  evidenceError.value = ''
+  if (!evidenceForm.title.trim()) {
+    evidenceError.value = '请填写成果标题'
+    return
+  }
+  evidenceSaving.value = true
+  try {
+    await recordCompetencyEvidence({
+      competencyId: evidenceForm.competencyId,
+      title: evidenceForm.title,
+      description: evidenceForm.description,
+      assessedLevel: evidenceForm.assessedLevel,
+      note: evidenceForm.note,
+    })
+    evidenceModalOpen.value = false
+    success('成果已记录，能力等级与路线进度已同步')
+  } catch (caught) {
+    evidenceError.value = caught instanceof Error ? caught.message : String(caught)
+  } finally {
+    evidenceSaving.value = false
+  }
+}
+
+const milestoneModalOpen = ref(false)
+const milestoneSaving = ref(false)
+const milestoneError = ref('')
+const milestoneEditingId = ref<string | null>(null)
+const milestoneForm = reactive({
+  directionId: '',
+  name: '',
+  description: '',
+  dueDate: '',
+  status: MilestoneStatus.NOT_STARTED as MilestoneStatus,
+  importance: Importance.NORMAL as Importance,
+})
+
+function openMilestoneCreate(direction: Direction): void {
+  milestoneEditingId.value = null
+  Object.assign(milestoneForm, {
+    directionId: direction.id,
+    name: '',
+    description: '',
+    dueDate: '',
+    status: MilestoneStatus.NOT_STARTED,
+    importance: Importance.NORMAL,
+  })
+  milestoneError.value = ''
+  milestoneModalOpen.value = true
+}
+
+function openMilestoneEdit(milestone: Milestone): void {
+  milestoneEditingId.value = milestone.id
+  Object.assign(milestoneForm, {
+    directionId: milestone.directionId,
+    name: milestone.name,
+    description: milestone.description,
+    dueDate: toDateInput(milestone.dueDate),
+    status: milestone.status,
+    importance: milestone.importance,
+  })
+  milestoneError.value = ''
+  milestoneModalOpen.value = true
+}
+
+async function submitMilestone(): Promise<void> {
+  milestoneError.value = ''
+  if (!milestoneForm.name.trim()) {
+    milestoneError.value = '里程碑名称不能为空'
+    return
+  }
+  milestoneSaving.value = true
+  try {
+    await saveMilestone(
+      {
+        directionId: milestoneForm.directionId,
+        competencyId: null,
+        name: milestoneForm.name.trim(),
+        description: milestoneForm.description.trim(),
+        startDate: null,
+        dueDate: fromDateInput(milestoneForm.dueDate),
+        importance: milestoneForm.importance,
+        status: milestoneForm.status,
+        successCriteria: '',
+      },
+      milestoneEditingId.value ?? undefined,
+    )
+    milestoneModalOpen.value = false
+    success(milestoneEditingId.value ? '里程碑已更新' : '里程碑已创建')
+  } catch (caught) {
+    milestoneError.value = caught instanceof Error ? caught.message : String(caught)
+  } finally {
+    milestoneSaving.value = false
+  }
 }
 
 interface CompetencyForm {
@@ -458,6 +585,13 @@ onMounted(async () => {
         <span class="stat-icon icon-violet"><AppIcon name="layers" :size="16" /></span>
         <div><strong>{{ activeDirections.length }}</strong><span>进行中方向</span></div>
       </div>
+      <div class="roadmap-stat">
+        <span class="stat-icon icon-amber"><AppIcon name="flag" :size="16" /></span>
+        <div>
+          <strong>{{ inProgressMilestones }} / {{ milestones.length }}</strong>
+          <span>进行中里程碑</span>
+        </div>
+      </div>
     </section>
 
     <section class="card view-toolbar roadmap-toolbar">
@@ -552,6 +686,25 @@ onMounted(async () => {
           </header>
 
           <div v-if="expandedDirectionIds[summary.direction.id]" class="direction-body">
+            <div class="milestone-panel">
+              <div class="ability-heading-row">
+                <span><AppIcon name="flag" :size="14" /> 阶段里程碑</span>
+                <button class="link-btn" @click="openMilestoneCreate(summary.direction)">添加里程碑</button>
+              </div>
+              <ul v-if="milestonesOfDirection(summary.direction.id).length" class="milestone-list">
+                <li v-for="milestone in milestonesOfDirection(summary.direction.id)" :key="milestone.id">
+                  <button class="milestone-main" @click="openMilestoneEdit(milestone)">
+                    <span class="milestone-name">{{ milestone.name }}</span>
+                    <span class="milestone-meta">
+                      {{ formatShortDate(milestone.dueDate, '待定') }}
+                      · {{ milestoneStatusLabels[milestone.status] }}
+                      · {{ importanceLabels[milestone.importance] }}
+                    </span>
+                  </button>
+                </li>
+              </ul>
+              <p v-else class="detail-empty">还没有阶段里程碑。用它标记这条路线上必须发生的阶段成果。</p>
+            </div>
             <div class="ability-heading-row">
               <span><AppIcon name="layers" :size="14" /> 能力树</span>
               <span>点击“拆解为目标”进入目标拆解</span>
@@ -648,6 +801,9 @@ onMounted(async () => {
             </div>
           </div>
           <p v-else class="detail-empty">还没有成长证据。</p>
+          <button v-if="!detailCompetency.archivedAt" class="btn btn-sm btn-secondary" @click="openEvidence(detailCompetency)">
+            <AppIcon name="plus" :size="13" /> 记录成果并评估等级
+          </button>
         </div>
       </div>
       <template #footer>
@@ -738,6 +894,85 @@ onMounted(async () => {
       </form>
     </ModalDialog>
 
+    <ModalDialog
+      :open="evidenceModalOpen"
+      title="记录成果并评估等级"
+      subtitle="成果会沉淀为能力证据，可据此更新当前等级。"
+      size="md"
+      @close="evidenceModalOpen = false"
+    >
+      <form class="form" @submit.prevent="submitEvidence">
+        <div class="field">
+          <label class="field-label" for="evidence-title">成果标题</label>
+          <input id="evidence-title" v-model="evidenceForm.title" class="input" placeholder="例如：完成 WalkSAT 变量选择实现并通过测试" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="evidence-desc">说明</label>
+          <textarea id="evidence-desc" v-model="evidenceForm.description" class="textarea" placeholder="这份成果具体证明什么？" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="evidence-level">评估等级</label>
+          <select id="evidence-level" v-model="evidenceForm.assessedLevel" class="select">
+            <option v-for="level in levels" :key="level" :value="level">{{ level }} · {{ competencyLevelLabels[level] }}</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label" for="evidence-note">评估备注</label>
+          <textarea id="evidence-note" v-model="evidenceForm.note" class="textarea" placeholder="为什么是这一等级？还有哪些差距？" />
+        </div>
+        <p v-if="evidenceError" class="form-error">{{ evidenceError }}</p>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" @click="evidenceModalOpen = false">取消</button>
+          <button type="submit" class="btn btn-primary" :disabled="evidenceSaving">
+            {{ evidenceSaving ? '保存中…' : '记录成果' }}
+          </button>
+        </div>
+      </form>
+    </ModalDialog>
+
+    <ModalDialog
+      :open="milestoneModalOpen"
+      :title="milestoneEditingId ? '编辑里程碑' : '添加里程碑'"
+      subtitle="里程碑是发展方向上的阶段成果，目标与任务最终要支撑它。"
+      @close="milestoneModalOpen = false"
+    >
+      <form class="form" @submit.prevent="submitMilestone">
+        <div class="field">
+          <label class="field-label" for="milestone-name">名称</label>
+          <input id="milestone-name" v-model="milestoneForm.name" class="input" placeholder="例如：完成第一篇论文复现" />
+        </div>
+        <div class="field">
+          <label class="field-label" for="milestone-desc">说明</label>
+          <textarea id="milestone-desc" v-model="milestoneForm.description" class="textarea" placeholder="这个阶段结束时应该发生什么？" />
+        </div>
+        <div class="form-grid">
+          <div class="field">
+            <label class="field-label" for="milestone-due">截止日期</label>
+            <input id="milestone-due" v-model="milestoneForm.dueDate" class="input" type="date" />
+          </div>
+          <div class="field">
+            <label class="field-label" for="milestone-status">状态</label>
+            <select id="milestone-status" v-model="milestoneForm.status" class="select">
+              <option v-for="status in Object.values(MilestoneStatus)" :key="status" :value="status">{{ milestoneStatusLabels[status] }}</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label class="field-label" for="milestone-importance">重要度</label>
+          <select id="milestone-importance" v-model="milestoneForm.importance" class="select">
+            <option v-for="importance in Object.values(Importance)" :key="importance" :value="importance">{{ importanceLabels[importance] }}</option>
+          </select>
+        </div>
+        <p v-if="milestoneError" class="form-error">{{ milestoneError }}</p>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" @click="milestoneModalOpen = false">取消</button>
+          <button type="submit" class="btn btn-primary" :disabled="milestoneSaving">
+            {{ milestoneSaving ? '保存中…' : milestoneEditingId ? '保存修改' : '添加里程碑' }}
+          </button>
+        </div>
+      </form>
+    </ModalDialog>
+
     <ModalDialog :open="confirmOpen" :title="confirmTitle" @close="confirmOpen = false">
       <p class="confirm-text">{{ confirmText }}</p>
       <div class="modal-actions">
@@ -750,9 +985,15 @@ onMounted(async () => {
 
 <style scoped>
 .roadmap-flow { display: flex; align-items: center; gap: 10px; padding: 12px 16px; margin-bottom: 14px; color: var(--muted); font-size: .78rem; }
+.milestone-panel { padding: 12px 14px; margin-bottom: 14px; border: 1px dashed var(--line); border-radius: var(--radius-md); background: var(--surface-muted); }
+.milestone-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.milestone-main { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 8px 10px; text-align: left; border-radius: var(--radius-sm); }
+.milestone-main:hover { background: var(--surface); }
+.milestone-name { color: var(--ink); font-size: .82rem; font-weight: 600; }
+.milestone-meta { color: var(--muted); font-size: .72rem; }
 .roadmap-flow strong { color: var(--accent-strong); }
 .roadmap-flow .icon { color: var(--line-strong); }
-.roadmap-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.roadmap-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
 .roadmap-stat { display: flex; align-items: center; gap: 11px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface); }
 .roadmap-stat > div { display: grid; gap: 1px; }
 .roadmap-stat strong { font-size: 1.25rem; color: var(--ink); font-variant-numeric: tabular-nums; }

@@ -126,6 +126,12 @@ export const TimeboxStatus = {
 } as const
 export type TimeboxStatus = (typeof TimeboxStatus)[keyof typeof TimeboxStatus]
 
+export const TimeboxKind = {
+  TASK: 'TASK',
+  REVIEW: 'REVIEW',
+} as const
+export type TimeboxKind = (typeof TimeboxKind)[keyof typeof TimeboxKind]
+
 export const DependencyType = {
   FINISH_TO_START: 'FINISH_TO_START',
   START_TO_START: 'START_TO_START',

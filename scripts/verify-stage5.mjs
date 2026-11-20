@@ -152,8 +152,8 @@ try {
   )
   assert(stats[0] === '1', `学习会话应为 1，实际 ${stats[0]}`)
   assert(stats[1] === '45 分钟', `本周学习时长应为 45 分钟，实际 ${stats[1]}`)
-  assert(stats[2] === '0', `已完成复习应为 0，实际 ${stats[2]}`)
-  assert(stats[3] === '1', `待复习任务应为 1，实际 ${stats[3]}`)
+  assert(stats[2] === '1', `已完成复习应为 1，实际 ${stats[2]}`)
+  assert(stats[3] === '3', `待复习应为 3，实际 ${stats[3]}`)
   await waitText(page, '开始一次学习会话')
   pass('学习概览', stats.join(' / '))
 
@@ -324,23 +324,29 @@ try {
     if (!button) throw new Error('未找到完成复习按钮')
     button.click()
   })
-  await waitText(page, '复习已完成，任务已标记完成', 15000)
-  await waitText(page, '任务已标记完成')
-  pass('完成复习并标记任务', '任务进入已完成')
+  await page.waitForSelector('.check-row input', { timeout: 8000 })
+  await page.evaluate(() => {
+    const input = document.querySelector('.check-row input')
+    if (input && !input.checked) input.click()
+  })
+  await clickText(page, '.modal-actions button', '完成复习')
+  await waitText(page, '复习已完成，下一次复习已自动安排', 15000)
+  pass('完成复习并标记任务', '记录回忆评分并安排下一次复习')
 
   await clickText(page, '.view-tab', '工作台')
-  const completedOption = await page.$$eval('#start-task option', (nodes) =>
+  const learningOptions = await page.$$eval('#start-task option', (nodes) =>
     nodes.map((node) => (node.textContent ?? '').trim()),
   )
   assert(
-    completedOption.some(
-      (text) => text.includes('阅读 Linux 字符设备驱动框架') && text.includes('（已完成）'),
-    ),
-    `已完成任务未出现在学习任务下拉：${completedOption.join(' | ')}`,
+    !learningOptions.some((text) => text.includes('阅读 Linux 字符设备驱动框架')),
+    `已完成任务不应再出现在学习任务下拉：${learningOptions.join(' | ')}`,
   )
-  pass('已完成任务可再次学习', '学习任务下拉标注（已完成）')
+pass('已完成任务不再进入学习下拉', '可直接为它安排复习')
 
-  await clickText(page, 'a.nav-item', '目标与任务')
+  await page.goto(new URL('goals', APP_URL).href, {
+    waitUntil: 'networkidle0',
+    timeout: 30000,
+  })
   await page.waitForSelector('.goals-tasks', { timeout: 15000 })
   await clickText(page, '.view-tab', '任务')
   await page.waitForSelector('.task-row', { timeout: 15000 })
@@ -356,9 +362,20 @@ try {
   await page.waitForSelector('.learning-stats', { timeout: 15000 })
   await clickText(page, '.view-tab', '复习')
   await page.waitForSelector('.review-view', { timeout: 8000 })
+  await page.waitForFunction(
+    () =>
+      Array.from(document.querySelectorAll('.review-row')).some(
+        (node) =>
+          (node.textContent ?? '').includes('阅读 Linux 字符设备驱动框架') &&
+          (node.textContent ?? '').includes('取消完成'),
+      ),
+    { timeout: 15000 },
+  )
   const reverted = await page.evaluate(() => {
-    const row = Array.from(document.querySelectorAll('.review-row')).find((node) =>
-      (node.textContent ?? '').includes('阅读 Linux 字符设备驱动框架'),
+    const row = Array.from(document.querySelectorAll('.review-row')).find(
+      (node) =>
+        (node.textContent ?? '').includes('阅读 Linux 字符设备驱动框架') &&
+        (node.textContent ?? '').includes('取消完成'),
     )
     const button = Array.from(row?.querySelectorAll('button') ?? []).find((node) =>
       (node.textContent ?? '').includes('取消完成'),
@@ -368,7 +385,7 @@ try {
     return true
   })
   assert(reverted, '已完成复习缺少取消完成按钮')
-  await waitText(page, '任务已恢复为未完成，复习记录保留', 15000)
+  await waitText(page, '复习已撤销，下一次复习安排已移除', 15000)
   pass('取消完成', '任务恢复，复习记录保留')
 
   await clickText(page, 'a.nav-item', '目标与任务')
