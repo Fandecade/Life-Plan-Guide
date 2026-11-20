@@ -454,9 +454,9 @@ onMounted(() => {
                 dragging: draggingTaskId === item.taskId,
               }"
               :draggable="item.kind === 'task' && !item.isCompleted"
-              @dragstart="startTaskDrag(item.taskId, $event)"
+              @dragstart="item.taskId && startTaskDrag(item.taskId, $event)"
               @dragover.prevent
-              @drop.prevent="dropTask(item.taskId)"
+              @drop.prevent="item.taskId && dropTask(item.taskId)"
               @dragend="draggingTaskId = null"
             >
               <span class="schedule-time" :class="{ unscheduled: !item.start }">
@@ -465,7 +465,11 @@ onMounted(() => {
               <span class="schedule-rail">
                 <span class="schedule-dot" :class="{ timeboxed: item.kind === 'timebox' }" />
               </span>
-              <button class="schedule-copy schedule-open" @click="openTask(item.taskId)">
+              <button
+                class="schedule-copy schedule-open"
+                :disabled="!item.taskId"
+                @click="item.taskId && openTask(item.taskId)"
+              >
                 <span class="schedule-title">{{ item.title }}</span>
                 <span class="schedule-meta">
                   <span v-if="item.isReview" class="badge badge-accent">复习</span>
@@ -475,7 +479,7 @@ onMounted(() => {
                 </span>
               </button>
               <div class="schedule-actions">
-                <template v-if="item.kind === 'task' && !item.isCompleted">
+                <template v-if="item.kind === 'task' && item.taskId && !item.isCompleted">
                   <button
                     class="icon-btn"
                     title="上移"
@@ -502,7 +506,7 @@ onMounted(() => {
                   <AppIcon name="clock" :size="12" />
                 </button>
                 <button
-                  v-if="!item.isCompleted"
+                  v-if="item.taskId && !item.isCompleted"
                   class="icon-btn icon-btn-play"
                   title="开始学习"
                   aria-label="开始学习"
@@ -512,12 +516,13 @@ onMounted(() => {
                   <AppIcon name="play" :size="12" />
                 </button>
                 <button
+                  v-if="item.taskId"
                   class="icon-btn"
                   :class="{ 'icon-btn-check': item.isCompleted }"
                   :title="item.isCompleted ? '恢复任务' : '完成任务'"
                   :aria-label="item.isCompleted ? '恢复任务' : '完成任务'"
                   :disabled="item.taskStatus === null"
-                  @click="completeScheduleItem(item.taskId, item.isCompleted)"
+                  @click="item.taskId && completeScheduleItem(item.taskId, item.isCompleted)"
                 >
                   <AppIcon :name="item.isCompleted ? 'refresh' : 'check'" :size="12" />
                 </button>

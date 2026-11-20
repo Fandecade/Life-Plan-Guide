@@ -36,8 +36,14 @@ import type {
 } from '@/domain'
 import { SCHEMA_VERSION } from '@/domain'
 import { ALL_STORES } from './schema'
+import { DATABASE_NAME } from './constants'
+import {
+  buildMigrationReportSetting,
+  migrateV8Data,
+  type V8MigrationInput,
+} from './migrations/v8'
 
-export const DATABASE_NAME = 'personal-growth-os'
+export { DATABASE_NAME } from './constants'
 
 const V3_STORES = {
   visions: 'id, createdAt, updatedAt, status, reviewDate, archivedAt',
@@ -89,7 +95,22 @@ const V6_STORES = {
   evidences: 'id, evidenceType, taskId, createdAt, updatedAt, archivedAt',
 }
 
-const CURRENT_STORES = V6_STORES
+const V7_STORES = {
+  ...V6_STORES,
+  timeboxes: 'id, taskId, plannedStart, status, kind, updatedAt',
+}
+
+const V8_STORES = {
+  ...V7_STORES,
+  competencies:
+    'id, identityId, parentId, category, status, createdAt, updatedAt, archivedAt',
+  tasks:
+    'id, stageOutcomeId, parentTaskId, status, taskType, scheduledDate, dueDate, priority, completedAt, createdAt, updatedAt, archivedAt',
+  timeboxes: 'id, taskId, plannedStart, status, kind, updatedAt',
+  learningSessions: 'id, taskId, blockId, workflowId, status, startedAt, updatedAt',
+}
+
+const CURRENT_STORES = V8_STORES
 
 export class GrowthDatabase extends Dexie {
   visions!: Table<Vision, string>
@@ -135,6 +156,7 @@ export class GrowthDatabase extends Dexie {
       const identityRows = (await transaction.table('identities').toArray()) as Identity[]
       const firstIdentityByVision = new Map<string, string>()
       for (const identity of identityRows) {
+        if (!identity.visionId) continue
         if (!firstIdentityByVision.has(identity.visionId)) {
           firstIdentityByVision.set(identity.visionId, identity.id)
         }
@@ -191,22 +213,58 @@ export class GrowthDatabase extends Dexie {
         })
     })
 
-    this.version(SCHEMA_VERSION).stores(CURRENT_STORES)
+    this.version(7).stores(V7_STORES)
 
-    this.version(SCHEMA_VERSION).upgrade(async (transaction) => {
+    this.version(7).upgrade(async (transaction) => {
       await transaction
         .table<Timebox>('timeboxes')
         .toCollection()
         .modify((timebox) => {
           if (timebox.kind === undefined) {
-            timebox.kind = 'TASK'
+            timebox.kind = taskIdLike(timebox) ? 'TASK' : 'FOCUS'
           }
           if (timebox.reviewScheduleId === undefined) {
             timebox.reviewScheduleId = null
           }
         })
     })
+
+    this.version(SCHEMA_VERSION).stores(CURRENT_STORES)
+
+    this.version(SCHEMA_VERSION).upgrade(async (transaction) => {
+      const input: V8MigrationInput = {
+        identities: await transaction.table<Identity>('identities').toArray(),
+        directions: await transaction.table<Direction>('directions').toArray(),
+        competencies: await transaction.table<Competency>('competencies').toArray(),
+        directionCompetencies: await transaction
+          .table<DirectionCompetency>('directionCompetencies')
+          .toArray(),
+        goals: await transaction.table<Goal>('goals').toArray(),
+        tasks: await transaction.table<Task>('tasks').toArray(),
+        taskGoals: await transaction.table<TaskGoal>('taskGoals').toArray(),
+        timeboxes: await transaction.table<Timebox>('timeboxes').toArray(),
+        learningSessions: await transaction
+          .table<LearningSession>('learningSessions')
+          .toArray(),
+      }
+      const { data, report } = migrateV8Data(input, { fromSchemaVersion: 7 })
+      await transaction.table<Identity>('identities').bulkPut(data.identities)
+      await transaction.table<Competency>('competencies').bulkPut(data.competencies)
+      await transaction.table<Task>('tasks').bulkPut(data.tasks)
+      await transaction.table<Timebox>('timeboxes').bulkPut(data.timeboxes)
+      await transaction.table<LearningSession>('learningSessions').bulkPut(data.learningSessions)
+
+      const reportKey = 'migration.v8.report'
+      const existing = await transaction.table<UserSettings>('userSettings').get(reportKey)
+      await transaction
+        .table<UserSettings>('userSettings')
+        .put(buildMigrationReportSetting(report, existing, reportKey))
+    })
   }
+}
+
+function taskIdLike(timebox: Timebox): boolean {
+  return typeof timebox.taskId === 'string' && timebox.taskId.length > 0
 }
 
 export interface DatabaseInfo {

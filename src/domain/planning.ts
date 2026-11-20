@@ -29,6 +29,7 @@ export interface Goal extends BaseEntity {
 }
 
 export interface Task extends BaseEntity {
+  stageOutcomeId: string | null
   title: string
   description: string
   taskType: TaskType
@@ -48,7 +49,7 @@ export interface Task extends BaseEntity {
 }
 
 export interface Timebox extends BaseEntity {
-  taskId: string
+  taskId: string | null
   plannedStart: string
   plannedEnd: string
   plannedDuration: number
@@ -57,6 +58,6 @@ export interface Timebox extends BaseEntity {
   actualDuration: number
   status: TimeboxStatus
   note: string
-  kind?: TimeboxKind
-  reviewScheduleId?: string | null
+  kind: TimeboxKind
+  reviewScheduleId: string | null
 }

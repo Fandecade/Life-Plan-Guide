@@ -32,6 +32,7 @@ export interface Workflow extends BaseEntity {
 
 export interface LearningSession extends BaseEntity {
   taskId: string | null
+  blockId: string | null
   workflowId: string | null
   startedAt: string
   endedAt: string | null

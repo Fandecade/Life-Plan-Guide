@@ -105,7 +105,15 @@ function go(path: string): void {
             <span class="timeline-dot" />
             <div class="timeline-copy">
               <span class="timeline-task">
-                {{ taskMap[timebox.taskId]?.title ?? '任务已不存在' }}
+                {{
+                  timebox.taskId
+                    ? taskMap[timebox.taskId]?.title ?? '任务已不存在'
+                    : timebox.kind === 'BREAK'
+                      ? '休息时间'
+                      : timebox.kind === 'FOCUS'
+                        ? '自由专注'
+                        : '未命名时间块'
+                }}
               </span>
               <span class="timeline-meta">
                 {{ formatTime(timebox.plannedStart) }} – {{ formatTime(timebox.plannedEnd) }}

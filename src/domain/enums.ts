@@ -129,6 +129,8 @@ export type TimeboxStatus = (typeof TimeboxStatus)[keyof typeof TimeboxStatus]
 export const TimeboxKind = {
   TASK: 'TASK',
   REVIEW: 'REVIEW',
+  FOCUS: 'FOCUS',
+  BREAK: 'BREAK',
 } as const
 export type TimeboxKind = (typeof TimeboxKind)[keyof typeof TimeboxKind]
 

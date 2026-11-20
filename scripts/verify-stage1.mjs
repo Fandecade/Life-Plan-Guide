@@ -144,7 +144,7 @@ try {
   const backupPath = await waitForFile(DOWNLOAD_DIR)
   const backup = JSON.parse(readFileSync(backupPath, 'utf8'))
   assert(backup.app === 'personal-growth-os', '备份 app 标识不正确')
-  assert(backup.schemaVersion === 7, '备份 schemaVersion 不正确')
+  assert(backup.schemaVersion === 8, '备份 schemaVersion 不正确')
   assert(Array.isArray(backup.data.visions) && backup.data.visions.length === 1, '备份缺少愿景')
   assert(Array.isArray(backup.data.tasks) && backup.data.tasks.length === 5, '备份任务数量异常')
   await waitText(page, '已导出')

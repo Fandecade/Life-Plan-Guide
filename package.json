@@ -11,6 +11,7 @@
     "typecheck": "vue-tsc --noEmit",
     "verify:smoke": "node scripts/verify-smoke.mjs",
     "verify:stage1": "node scripts/verify-stage1.mjs",
+    "verify:growth-stage1": "node scripts/verify-growth-stage1.mjs",
     "verify:stage2": "node scripts/verify-stage2.mjs",
     "verify:stage3": "node scripts/verify-stage3.mjs",
     "verify:stage4": "node scripts/verify-stage4.mjs",

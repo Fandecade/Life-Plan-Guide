@@ -179,12 +179,20 @@ export type ForeignKeyRule = {
 }
 
 export const FOREIGN_KEYS: Partial<Record<StoreName, ForeignKeyRule[]>> = {
-  identities: [{ field: 'visionId', target: StoreName.VISIONS, label: '所属愿景' }],
+  identities: [
+    { field: 'visionId', target: StoreName.VISIONS, nullable: true, label: '所属愿景' },
+  ],
   directions: [
     { field: 'visionId', target: StoreName.VISIONS, label: '所属愿景' },
     { field: 'identityId', target: StoreName.IDENTITIES, nullable: true, label: '所属身份' },
   ],
   competencies: [
+    {
+      field: 'identityId',
+      target: StoreName.IDENTITIES,
+      nullable: true,
+      label: '所属身份',
+    },
     { field: 'parentId', target: StoreName.COMPETENCIES, nullable: true, label: '父能力' },
   ],
   milestones: [
@@ -196,10 +204,18 @@ export const FOREIGN_KEYS: Partial<Record<StoreName, ForeignKeyRule[]>> = {
     { field: 'competencyId', target: StoreName.COMPETENCIES, nullable: true, label: '主能力' },
   ],
   tasks: [
+    {
+      field: 'stageOutcomeId',
+      target: StoreName.GOALS,
+      nullable: true,
+      label: '所属阶段成果',
+    },
     { field: 'parentTaskId', target: StoreName.TASKS, nullable: true, label: '父任务' },
     { field: 'learningTemplateId', target: StoreName.WORKFLOWS, nullable: true, label: '学习流程' },
   ],
-  timeboxes: [{ field: 'taskId', target: StoreName.TASKS, label: '关联任务' }],
+  timeboxes: [
+    { field: 'taskId', target: StoreName.TASKS, nullable: true, label: '关联任务' },
+  ],
   habitLogs: [{ field: 'habitId', target: StoreName.HABITS, label: '关联习惯' }],
   behaviorCandidates: [
     { field: 'directionId', target: StoreName.DIRECTIONS, nullable: true, label: '关联方向' },
@@ -207,6 +223,12 @@ export const FOREIGN_KEYS: Partial<Record<StoreName, ForeignKeyRule[]>> = {
   ],
   learningSessions: [
     { field: 'taskId', target: StoreName.TASKS, nullable: true, label: '关联任务' },
+    {
+      field: 'blockId',
+      target: StoreName.TIMEBOXES,
+      nullable: true,
+      label: '关联时间块',
+    },
     { field: 'workflowId', target: StoreName.WORKFLOWS, nullable: true, label: '学习流程' },
   ],
   learningRecords: [

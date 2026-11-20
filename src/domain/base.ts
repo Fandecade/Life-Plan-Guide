@@ -1,4 +1,4 @@
-export const SCHEMA_VERSION = 7
+export const SCHEMA_VERSION = 8
 
 export const SyncStatus = {
   LOCAL_ONLY: 'LOCAL_ONLY',

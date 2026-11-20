@@ -402,6 +402,7 @@ export function useLearning() {
     const firstStage = workflow?.stages[0]?.key ?? null
     const entity = await repos.learningSessions.create({
       taskId: input.taskId,
+      blockId: null,
       workflowId: input.workflowId,
       startedAt: nowIso(),
       endedAt: null,

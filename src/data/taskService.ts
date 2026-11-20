@@ -103,7 +103,8 @@ async function skipOpenTimeboxesForTask(
   return skipped
 }
 
-export async function syncTaskActualDuration(taskId: string): Promise<number> {
+export async function syncTaskActualDuration(taskId: string | null): Promise<number> {
+  if (!taskId) return 0
   const rows = await repos.timeboxes.list({ includeArchived: true })
   const total = rows
     .filter(

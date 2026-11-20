@@ -1,6 +1,8 @@
 import { SCHEMA_VERSION, SyncStatus, type BaseEntity } from '@/domain'
 import { todayKey } from '@/utils/date'
 import { GrowthDatabase } from './db'
+import { validateGrowthSnapshot } from './growthValidation'
+import { migrateV8Data, type V8MigrationInput, type V8MigrationReport } from './migrations/v8'
 import {
   ALL_STORES,
   FOREIGN_KEYS,
@@ -49,6 +51,74 @@ export interface ImportResult {
   mode: ImportMode
   imported: number
   skipped: number
+}
+
+export interface BackupNormalizationResult {
+  backup: BackupFile
+  report: V8MigrationReport
+}
+
+function rowsOf<T>(data: BackupStoreData, store: StoreName): T[] {
+  return ((data as Record<string, unknown[]>)[store] ?? []) as T[]
+}
+
+function withoutInvalidRows(backup: BackupFile): BackupFile {
+  const data: BackupStoreData = {}
+  for (const store of ALL_STORES) {
+    const rows = (backup.data as Record<string, unknown>)[store]
+    if (!Array.isArray(rows)) continue
+    const valid = rows.filter((row): row is BaseEntity => {
+      if (!row || typeof row !== 'object') return false
+      const entity = row as Partial<BaseEntity>
+      return typeof entity.id === 'string' && entity.id.length > 0
+    })
+    if (valid.length > 0) {
+      ;(data as Record<string, unknown[]>)[store] = valid
+    }
+  }
+  return { ...backup, data }
+}
+
+export function normalizeBackupData(backup: BackupFile): BackupNormalizationResult {
+  const clean = withoutInvalidRows(backup)
+  const input: V8MigrationInput = {
+    identities: rowsOf(clean.data, StoreName.IDENTITIES),
+    directions: rowsOf(clean.data, StoreName.DIRECTIONS),
+    competencies: rowsOf(clean.data, StoreName.COMPETENCIES),
+    directionCompetencies: rowsOf(clean.data, StoreName.DIRECTION_COMPETENCIES),
+    goals: rowsOf(clean.data, StoreName.GOALS),
+    tasks: rowsOf(clean.data, StoreName.TASKS),
+    taskGoals: rowsOf(clean.data, StoreName.TASK_GOALS),
+    timeboxes: rowsOf(clean.data, StoreName.TIMEBOXES),
+    learningSessions: rowsOf(clean.data, StoreName.LEARNING_SESSIONS),
+  }
+  const migrated = migrateV8Data(input, { fromSchemaVersion: backup.schemaVersion })
+  const data: BackupStoreData = { ...clean.data }
+  ;(data as Record<string, unknown[]>)[StoreName.IDENTITIES] = migrated.data.identities
+  ;(data as Record<string, unknown[]>)[StoreName.COMPETENCIES] = migrated.data.competencies
+  ;(data as Record<string, unknown[]>)[StoreName.TASKS] = migrated.data.tasks
+  ;(data as Record<string, unknown[]>)[StoreName.TIMEBOXES] = migrated.data.timeboxes
+  ;(data as Record<string, unknown[]>)[StoreName.LEARNING_SESSIONS] =
+    migrated.data.learningSessions
+
+  // v8 只新增这些字段；其余旧实体原样保留，仅将结构版本标记为当前版本。
+  for (const store of ALL_STORES) {
+    const rows = (data as Record<string, unknown[]>)[store]
+    if (!rows) continue
+    ;(data as Record<string, unknown[]>)[store] = rows.map((row) => ({
+      ...(row as BaseEntity),
+      schemaVersion: SCHEMA_VERSION,
+    }))
+  }
+
+  return {
+    backup: {
+      ...clean,
+      schemaVersion: SCHEMA_VERSION,
+      data,
+    },
+    report: migrated.report,
+  }
 }
 
 export function isBackupFile(value: unknown): value is BackupFile {
@@ -132,13 +202,13 @@ export async function analyzeBackup(
   }
   if (backup.schemaVersion < SCHEMA_VERSION) {
     warnings.push(
-      `备份结构版本 v${backup.schemaVersion} 低于当前 v${SCHEMA_VERSION}，导入时将按当前结构读取`,
+      `备份结构版本 v${backup.schemaVersion} 低于当前 v${SCHEMA_VERSION}，导入时会自动迁移并保留旧关联`,
     )
   }
 
   const counts: Record<string, number> = {}
   let total = 0
-  const rowsByStore: Partial<Record<StoreName, BaseEntity[]>> = {}
+  const rawRowsByStore: Partial<Record<StoreName, BaseEntity[]>> = {}
 
   for (const store of ALL_STORES) {
     const rows = (backup.data as Record<string, unknown>)[store]
@@ -158,9 +228,45 @@ export async function analyzeBackup(
     if (valid.length !== rows.length) {
       warnings.push(`${STORE_LABELS[store]} 中有 ${rows.length - valid.length} 条记录缺少 id，已忽略`)
     }
-    rowsByStore[store] = valid
+    rawRowsByStore[store] = valid
     counts[store] = valid.length
     total += valid.length
+  }
+
+  const normalized = normalizeBackupData({
+    ...backup,
+    data: rawRowsByStore as BackupStoreData,
+  })
+  const rowsByStore: Partial<Record<StoreName, BaseEntity[]>> = {}
+  for (const store of ALL_STORES) {
+    rowsByStore[store] = rowsOf<BaseEntity>(normalized.backup.data, store)
+    counts[store] = rowsByStore[store].length
+  }
+
+  if (normalized.report.competencyIdentityInferred > 0) {
+    warnings.push(
+      `已为 ${normalized.report.competencyIdentityInferred} 个能力推断身份归属`,
+    )
+  }
+  if (normalized.report.competencyIdentityUnresolved > 0) {
+    warnings.push(
+      `${normalized.report.competencyIdentityUnresolved} 个能力无法推断身份，将以孤立对象保留`,
+    )
+  }
+  if (normalized.report.taskStageOutcomeMapped > 0) {
+    warnings.push(
+      `已从旧任务关系中补全 ${normalized.report.taskStageOutcomeMapped} 个任务的主阶段成果`,
+    )
+  }
+  if (normalized.report.taskStageOutcomeUnresolved > 0) {
+    warnings.push(
+      `${normalized.report.taskStageOutcomeUnresolved} 个旧任务没有可用阶段成果，将保留为待补齐任务`,
+    )
+  }
+  if (normalized.report.timeboxKindsDefaulted > 0) {
+    warnings.push(
+      `已为 ${normalized.report.timeboxKindsDefaulted} 个时间块补齐类型`,
+    )
   }
 
   let idConflicts = 0
@@ -239,6 +345,7 @@ export async function importBackup(
 ): Promise<ImportResult> {
   let imported = 0
   let skipped = 0
+  const normalized = normalizeBackupData(backup)
 
   await db.transaction('rw', db.tables, async () => {
     if (mode === 'replace') {
@@ -248,7 +355,7 @@ export async function importBackup(
     }
 
     for (const store of ALL_STORES) {
-      const rows = (backup.data as Record<string, unknown>)[store]
+      const rows = (normalized.backup.data as Record<string, unknown>)[store]
       if (!Array.isArray(rows) || rows.length === 0) continue
 
       let pending = rows as BaseEntity[]
@@ -274,6 +381,8 @@ export interface DataHealth {
   orphanCount: number
   missing: MissingReference[]
   duplicates: number
+  domainIssues: string[]
+  domainIssueCount: number
 }
 
 export async function inspectDataHealth(db: GrowthDatabase): Promise<DataHealth> {
@@ -324,7 +433,26 @@ export async function inspectDataHealth(db: GrowthDatabase): Promise<DataHealth>
     }
   }
 
-  return { orphanCount: missing.length, missing, duplicates }
+  const validation = validateGrowthSnapshot({
+    identities: await db.identities.toArray(),
+    competencies: await db.competencies.toArray(),
+    stageOutcomes: await db.goals.toArray(),
+    tasks: await db.tasks.toArray(),
+    timeboxes: await db.timeboxes.toArray(),
+    learningSessions: await db.learningSessions.toArray(),
+    taskGoals: await db.taskGoals.toArray(),
+  })
+  const domainIssues = validation.issues.map(
+    (row) => `[${row.severity === 'error' ? '错误' : '提示'}] ${row.message}`,
+  )
+
+  return {
+    orphanCount: missing.length,
+    missing,
+    duplicates,
+    domainIssues,
+    domainIssueCount: domainIssues.length,
+  }
 }
 
 export async function recordExport(

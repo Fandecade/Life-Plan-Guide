@@ -23,6 +23,7 @@ import {
   ReviewScheduleStatus,
   TaskStatus,
   TaskType,
+  TimeboxKind,
   Urgency,
   goalStatusLabels,
   goalTypeLabels,
@@ -193,7 +194,12 @@ const goalMap = computed<Record<string, Goal>>(() => {
 const taskMap = computed(() => new Map(tasks.value.map((task) => [task.id, task])))
 
 function taskFor(timebox: Timebox): Task | undefined {
-  return taskMap.value.get(timebox.taskId)
+  return timebox.taskId ? taskMap.value.get(timebox.taskId) : undefined
+}
+
+function timeboxLabel(timebox: Timebox): string {
+  if (timebox.taskId) return taskMap.value.get(timebox.taskId)?.title ?? '任务已不存在'
+  return timebox.kind === TimeboxKind.BREAK ? '休息时间' : '自由专注'
 }
 
 const goalTitlesByTask = computed<Record<string, string[]>>(() => {
@@ -219,6 +225,7 @@ const predecessorTitlesByTask = computed<Record<string, string[]>>(() => {
 const timeboxCounts = computed<Record<string, number>>(() => {
   const counts: Record<string, number> = {}
   for (const timebox of timeboxes.value) {
+    if (!timebox.taskId) continue
     counts[timebox.taskId] = (counts[timebox.taskId] ?? 0) + 1
   }
   return counts
@@ -1061,7 +1068,10 @@ async function submitTask(): Promise<void> {
     const existing = taskEditingId.value
       ? tasks.value.find((task) => task.id === taskEditingId.value)
       : null
+    const stageOutcomeId =
+      existing?.stageOutcomeId ?? taskForm.goalIds[0] ?? ''
     const payload: TaskInput = {
+      stageOutcomeId,
       title: taskForm.title.trim(),
       description: taskForm.description.trim(),
       taskType: taskForm.taskType,
@@ -1183,7 +1193,7 @@ function askDeleteTimebox(timebox: Timebox): void {
   confirmTarget.value = {
     kind: 'timebox',
     id: timebox.id,
-    label: `${taskNameById.value[timebox.taskId] ?? '任务'} · ${formatShortDate(timebox.plannedStart)} ${formatTime(timebox.plannedStart)}`,
+    label: `${timeboxLabel(timebox)} · ${formatShortDate(timebox.plannedStart)} ${formatTime(timebox.plannedStart)}`,
     archived: false,
   }
   confirmOpen.value = true
@@ -1239,8 +1249,8 @@ function openTimeboxCreate(task?: Task, dayKey?: string): void {
 function openTimeboxEdit(timebox: Timebox): void {
   timeboxEditingId.value = timebox.id
   Object.assign(timeboxForm, {
-    goalId: (taskGoalIds.value[timebox.taskId] ?? [])[0] ?? '',
-    taskId: timebox.taskId,
+    goalId: timebox.taskId ? (taskGoalIds.value[timebox.taskId] ?? [])[0] ?? '' : '',
+    taskId: timebox.taskId ?? '',
     plannedStart: toDateTimeInput(timebox.plannedStart),
     plannedEnd: toDateTimeInput(timebox.plannedEnd),
     status: timebox.status,
@@ -1264,8 +1274,11 @@ async function submitTimebox(): Promise<void> {
   }
   saving.value = true
   try {
+    const taskId = timeboxForm.taskId || null
     const payload: TimeboxInput = {
-      taskId: timeboxForm.taskId,
+      taskId,
+      kind: taskId ? TimeboxKind.TASK : TimeboxKind.FOCUS,
+      reviewScheduleId: null,
       plannedStart,
       plannedEnd,
       plannedDuration: 0,

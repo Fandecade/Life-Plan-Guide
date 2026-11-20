@@ -13,7 +13,7 @@ export interface Vision extends BaseEntity {
 }
 
 export interface Identity extends BaseEntity {
-  visionId: string
+  visionId: string | null
   title: string
   description: string
   identityStatement: string

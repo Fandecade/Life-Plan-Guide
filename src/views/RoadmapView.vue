@@ -443,7 +443,27 @@ async function submitCompetency(): Promise<void> {
   }
   saving.value = true
   try {
+    const parent = competencyForm.parentId
+      ? visibleCompetencies.value.find((row) => row.id === competencyForm.parentId)
+      : undefined
+    const assignedIdentityId = competencyForm.selectedDirectionIds
+      .map((directionId) => directionMap.value[directionId]?.identityId)
+      .find((identityId): identityId is string => Boolean(identityId))
+    const fallbackIdentityId = activeDirections.value
+      .map((direction) => direction.identityId)
+      .find((identityId): identityId is string => Boolean(identityId))
+    const existing = editingId.value
+      ? competencies.value.find((row) => row.id === editingId.value)
+      : undefined
+    const identityId =
+      existing?.identityId ?? parent?.identityId ?? assignedIdentityId ?? fallbackIdentityId
+    if (!identityId) {
+      formError.value = '能力必须归属一个身份，请先创建方向或选择父能力'
+      return
+    }
     const payload: CompetencyInput = {
+      identityId,
+      weight: existing?.weight ?? 1,
       name: competencyForm.name.trim(),
       description: competencyForm.description.trim(),
       category: competencyForm.category,

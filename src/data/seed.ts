@@ -28,6 +28,7 @@ import {
   SessionStatus,
   TaskStatus,
   TaskType,
+  TimeboxKind,
   Urgency,
   VisionStatus,
   AdjustmentStatus,
@@ -165,6 +166,8 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
   })
 
   const competencyAlgorithm = await repos.competencies.create({
+    identityId: researcherIdentity.id,
+    weight: 1,
     name: '算法与数据结构',
     description: '理解常见算法范式，能够分析复杂度并独立实现。',
     category: CompetencyCategory.KNOWLEDGE,
@@ -176,6 +179,8 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
   })
 
   const competencySat = await repos.competencies.create({
+    identityId: researcherIdentity.id,
+    weight: 1,
     name: 'SAT 与局部搜索',
     description: '理解 SAT 问题建模、局部搜索与群智能求解方法。',
     category: CompetencyCategory.KNOWLEDGE,
@@ -187,6 +192,8 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
   })
 
   const competencyCpp = await repos.competencies.create({
+    identityId: engineerIdentity.id,
+    weight: 1,
     name: 'C++ 工程能力',
     description: '能够使用现代 C++ 编写可维护的系统代码。',
     category: CompetencyCategory.SKILL,
@@ -198,6 +205,8 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
   })
 
   const competencyLinux = await repos.competencies.create({
+    identityId: engineerIdentity.id,
+    weight: 1,
     name: 'Linux 系统与驱动',
     description: '理解 Linux 系统编程和字符设备驱动的基本机制。',
     category: CompetencyCategory.SKILL,
@@ -209,6 +218,8 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
   })
 
   const competencyResearch = await repos.competencies.create({
+    identityId: researcherIdentity.id,
+    weight: 1,
     name: '科研阅读与写作',
     description: '能够高效阅读论文、提炼问题并撰写实验分析。',
     category: CompetencyCategory.SOFT_SKILL,
@@ -379,6 +390,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
   })
 
   const taskRead = await repos.tasks.create({
+    stageOutcomeId: goalSat.id,
     title: '阅读 SAT 局部搜索论文',
     description: '重点理解 WalkSAT 的变量选择机制和噪声参数。',
     taskType: TaskType.LEARNING,
@@ -398,6 +410,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
   })
 
   const taskOutput = await repos.tasks.create({
+    stageOutcomeId: goalSat.id,
     title: '白纸输出算法流程',
     description: '关闭论文，用自己的语言写出 WalkSAT 的主要执行过程。',
     taskType: TaskType.OUTPUT,
@@ -417,6 +430,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
   })
 
   const taskImplement = await repos.tasks.create({
+    stageOutcomeId: goalSat.id,
     title: '实现变量选择函数',
     description: '在复现代码中实现 WalkSAT 的变量选择逻辑，并补充单元测试。',
     taskType: TaskType.PRACTICE,
@@ -436,6 +450,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
   })
 
   const taskDriver = await repos.tasks.create({
+    stageOutcomeId: goalEmbedded.id,
     title: '阅读 Linux 字符设备驱动框架',
     description: '梳理 file_operations、注册流程和用户态读写路径。',
     taskType: TaskType.LEARNING,
@@ -455,6 +470,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
   })
 
   await repos.tasks.create({
+    stageOutcomeId: goalSat.id,
     title: '复习：蚁群算法与信息素更新',
     description: '主动回忆信息素更新公式，并解释参数对搜索的影响。',
     taskType: TaskType.REVIEW,
@@ -496,6 +512,8 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
 
   await repos.timeboxes.create({
     taskId: taskRead.id,
+    kind: TimeboxKind.TASK,
+    reviewScheduleId: null,
     plannedStart: at(0, 9),
     plannedEnd: at(0, 9, 45),
     plannedDuration: 45,
@@ -577,6 +595,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
 
   const session = await repos.learningSessions.create({
     taskId: taskRead.id,
+    blockId: null,
     workflowId: workflow.id,
     startedAt: at(0, 8, 30),
     endedAt: at(0, 9, 15),
@@ -696,7 +715,7 @@ export async function seedDemoData(repos: Repositories): Promise<void> {
     actualDuration: 0,
     status: 'PLANNED',
     note: '复习提醒',
-    kind: 'REVIEW',
+    kind: TimeboxKind.REVIEW,
     reviewScheduleId: null,
   })
 

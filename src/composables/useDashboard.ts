@@ -8,6 +8,7 @@ import {
   ReviewType,
   TaskStatus,
   TaskType,
+  TimeboxKind,
   TimeboxStatus,
   computeGoalProgress,
   taskStatusLabels,
@@ -46,7 +47,7 @@ export interface TodayScheduleItem {
   id: string
   kind: 'timebox' | 'task'
   timeboxId: string | null
-  taskId: string
+  taskId: string | null
   title: string
   description: string
   start: string | null
@@ -170,10 +171,14 @@ export function useDashboard() {
           isSameDay(timebox.plannedStart) && timebox.status !== TimeboxStatus.SKIPPED,
       )
       .sort((left, right) => left.plannedStart.localeCompare(right.plannedStart))
-    const boxedTaskIds = new Set(todayTimeboxes.map((timebox) => timebox.taskId))
+    const boxedTaskIds = new Set(
+      todayTimeboxes
+        .map((timebox) => timebox.taskId)
+        .filter((taskId): taskId is string => Boolean(taskId)),
+    )
 
     const entries: TodayScheduleItem[] = todayTimeboxes.map((timebox) => {
-      const task = taskMap.get(timebox.taskId)
+      const task = timebox.taskId ? taskMap.get(timebox.taskId) : undefined
       const taskStatus = task?.status ?? null
       const isReview = timebox.kind === 'REVIEW'
       const reviewDone = timebox.status === TimeboxStatus.COMPLETED
@@ -182,7 +187,13 @@ export function useDashboard() {
         kind: 'timebox',
         timeboxId: timebox.id,
         taskId: timebox.taskId,
-        title: task?.title ?? '任务已不存在',
+        title:
+          task?.title ??
+          (timebox.kind === TimeboxKind.BREAK
+            ? '休息时间'
+            : timebox.kind === TimeboxKind.FOCUS
+              ? '自由专注'
+              : '任务已不存在'),
         description: task?.description ?? '',
         start: timebox.plannedStart,
         duration: timebox.plannedDuration,
@@ -190,9 +201,13 @@ export function useDashboard() {
           ? reviewDone
             ? '复习完成'
             : '复习'
-          : taskStatus && CLOSED_TASK_STATUSES.has(taskStatus)
-            ? taskStatusLabels[taskStatus]
-            : timeboxStatusLabels[timebox.status],
+          : timebox.kind === TimeboxKind.BREAK && timebox.status !== TimeboxStatus.COMPLETED
+            ? '休息'
+            : timebox.kind === TimeboxKind.FOCUS && timebox.status !== TimeboxStatus.COMPLETED
+              ? '自由专注'
+              : taskStatus && CLOSED_TASK_STATUSES.has(taskStatus)
+                ? taskStatusLabels[taskStatus]
+                : timeboxStatusLabels[timebox.status],
         taskType: task?.taskType ?? null,
         taskStatus,
         isCompleted: isReview ? reviewDone : taskStatus === TaskStatus.COMPLETED,
@@ -224,8 +239,8 @@ export function useDashboard() {
       if (left.start && !right.start) return -1
       if (!left.start && right.start) return 1
       if (left.start && right.start) return left.start.localeCompare(right.start)
-      const leftOrder = taskOrder.value.indexOf(left.taskId)
-      const rightOrder = taskOrder.value.indexOf(right.taskId)
+      const leftOrder = left.taskId ? taskOrder.value.indexOf(left.taskId) : -1
+      const rightOrder = right.taskId ? taskOrder.value.indexOf(right.taskId) : -1
       if (leftOrder !== -1 || rightOrder !== -1) {
         if (leftOrder === -1) return 1
         if (rightOrder === -1) return -1
@@ -441,6 +456,7 @@ export function useDashboard() {
     const unscheduled = todaySchedule.value
       .filter((item) => item.kind === 'task' && !item.isCompleted)
       .map((item) => item.taskId)
+      .filter((taskId): taskId is string => Boolean(taskId))
     const index = unscheduled.indexOf(taskId)
     if (index < 0) return
     const target = index + direction
@@ -455,6 +471,7 @@ export function useDashboard() {
     const unscheduled = todaySchedule.value
       .filter((item) => item.kind === 'task' && !item.isCompleted)
       .map((item) => item.taskId)
+      .filter((taskId): taskId is string => Boolean(taskId))
     const from = unscheduled.indexOf(draggedTaskId)
     const to = unscheduled.indexOf(targetTaskId)
     if (from < 0 || to < 0) return
@@ -497,8 +514,17 @@ export function useDashboard() {
       return plannedStart.getTime() < end && start < plannedEnd.getTime()
     })
     if (conflict) {
-      const task = tasks.value.find((row) => row.id === conflict.taskId)
-      throw new Error(`与「${task?.title ?? '其他任务'}」的时间盒冲突`)
+      const task = conflict.taskId
+        ? tasks.value.find((row) => row.id === conflict.taskId)
+        : undefined
+      const label =
+        task?.title ??
+        (conflict.kind === TimeboxKind.BREAK
+          ? '休息时间'
+          : conflict.kind === TimeboxKind.FOCUS
+            ? '自由专注'
+            : '其他安排')
+      throw new Error(`与「${label}」的时间盒冲突`)
     }
 
     if (item.timeboxId) {
@@ -510,6 +536,8 @@ export function useDashboard() {
     } else {
       await repos.timeboxes.create({
         taskId: item.taskId,
+        kind: item.taskId ? TimeboxKind.TASK : TimeboxKind.FOCUS,
+        reviewScheduleId: null,
         plannedStart: plannedStart.toISOString(),
         plannedEnd: plannedEnd.toISOString(),
         plannedDuration: duration,

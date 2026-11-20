@@ -3,6 +3,7 @@ import {
   GoalStatus,
 
   TaskStatus,
+  TimeboxKind,
   computeGoalProgress,
   computeGoalTaskStats,
   type Goal,
@@ -188,7 +189,12 @@ export function useGoalsTasks() {
     )
     const weekMinutes = timeboxes.value
       .filter((timebox) => {
-        if (timebox.archivedAt || archivedTaskIds.has(timebox.taskId)) return false
+        if (
+          timebox.archivedAt ||
+          (timebox.taskId !== null && archivedTaskIds.has(timebox.taskId))
+        ) {
+          return false
+        }
         const start = new Date(timebox.plannedStart).getTime()
         return start >= monday.getTime() && start < nextMonday.getTime()
       })
@@ -395,9 +401,15 @@ export function useGoalsTasks() {
     competencyIds: string[],
     id?: string,
   ): Promise<Task> {
+    const stageOutcomeId = input.stageOutcomeId || goalIds[0] || null
+    if (!stageOutcomeId) throw new Error('新任务必须属于一个阶段成果')
+    if (goalIds.length > 0 && !goalIds.includes(stageOutcomeId)) {
+      throw new Error('主阶段成果必须包含在任务关联的目标中')
+    }
+    const taskInput = { ...input, stageOutcomeId }
     const entity = id
-      ? await repos.tasks.update(id, input)
-      : await repos.tasks.create(input)
+      ? await repos.tasks.update(id, taskInput)
+      : await repos.tasks.create(taskInput)
 
     const existingGoals = activeRelations.taskGoals.value.filter(
       (row) => row.taskId === entity.id,
@@ -489,6 +501,8 @@ export function useGoalsTasks() {
     const completed = input.status === 'COMPLETED'
     const payload = {
       ...input,
+      kind: input.kind ?? (input.taskId ? TimeboxKind.TASK : TimeboxKind.FOCUS),
+      reviewScheduleId: input.reviewScheduleId ?? null,
       plannedDuration: duration,
       actualStart: completed ? input.plannedStart : null,
       actualEnd: completed ? input.plannedEnd : null,
@@ -521,7 +535,11 @@ export function useGoalsTasks() {
       return start < otherEnd && otherStart < end
     })
     if (conflict) {
-      const name = taskNameById.value[conflict.taskId] ?? '其他任务'
+      const name = conflict.taskId
+        ? taskNameById.value[conflict.taskId] ?? '其他任务'
+        : conflict.kind === TimeboxKind.BREAK
+          ? '休息时间'
+          : '自由专注'
       throw new Error(`与「${name}」的时间盒存在时间冲突，请先调整时间`)
     }
     return Math.round((end - start) / 60000)

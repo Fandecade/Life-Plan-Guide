@@ -8,10 +8,12 @@ import type {
 } from './enums'
 
 export interface Competency extends BaseEntity {
+  identityId: string | null
   name: string
   description: string
   category: CompetencyCategory
   parentId: string | null
+  weight: number
   targetLevel: CompetencyLevel
   currentLevel: CompetencyLevel
   assessmentCriteria: string
